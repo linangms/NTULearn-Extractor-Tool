@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NTULearn Extractor Tool</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        ntuRed: '#C8102E',
+                        ntuBlue: '#002B49',
+                        ntuBg: '#F8FAFC'
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-ntuBg text-slate-800 font-sans min-h-screen flex flex-col">
+
+    <!-- Header / Navbar -->
+    <header class="bg-ntuBlue text-white shadow-md border-b-4 border-ntuRed">
+        <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 bg-ntuRed rounded-lg flex items-center justify-center font-bold text-xl shadow">
+                    <i class="fa-solid fa-file-export"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold tracking-tight">NTULearn Extractor Tool</h1>
+                    <p class="text-xs text-slate-300">LTI 1.3 Blackboard REST API Content Exporter</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2 bg-slate-800/60 px-3 py-1.5 rounded-full text-xs text-slate-200 border border-slate-700">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>LTI Session Active</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-6xl mx-auto px-6 py-8 flex-grow w-full space-y-8">
+
+        <!-- Course Information Card -->
+        <section class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div>
+                    <div class="flex items-center space-x-2 text-xs font-semibold uppercase tracking-wider text-ntuRed mb-1">
+                        <i class="fa-solid fa-graduation-cap"></i>
+                        <span>Target Course</span>
+                    </div>
+                    <h2 class="text-2xl font-extrabold text-slate-900" id="course-title">
+                        {{ course_name if course_name else "CZ4042 - Neural Networks & Deep Learning" }}
+                    </h2>
+                    <p class="text-sm text-slate-500 mt-1 flex items-center gap-4">
+                        <span><i class="fa-solid fa-hashtag text-slate-400 mr-1"></i> Course ID: <strong id="course-id" class="text-slate-700">{{ course_id if course_id else "NTU_CZ4042_2026_S1" }}</strong></span>
+                        <span><i class="fa-solid fa-user-tie text-slate-400 mr-1"></i> User Role: <strong class="text-slate-700">{{ user_role if user_role else "Instructor" }}</strong></span>
+                    </p>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <button id="extract-btn" onclick="startExtraction()" class="bg-ntuRed hover:bg-red-700 text-white font-semibold px-6 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i>
+                        <span>Extract & Convert Course to Markdown</span>
+                    </button>
+                    <a id="download-btn" href="#" class="hidden bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95 animate-bounce">
+                        <i class="fa-solid fa-file-zipper"></i>
+                        <span>Download Markdown Package (.zip)</span>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- Status & Live Progress Section -->
+        <section id="progress-card" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6 space-y-6">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <div id="spinner" class="w-6 h-6 border-3 border-ntuRed border-t-transparent rounded-full animate-spin"></div>
+                    <h3 class="text-lg font-bold text-slate-800" id="status-heading">Extraction in Progress...</h3>
+                </div>
+                <span id="progress-percentage" class="text-sm font-bold text-ntuRed bg-red-50 px-3 py-1 rounded-full border border-red-100">0%</span>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
+                <div id="progress-bar" class="bg-ntuRed h-3 rounded-full transition-all duration-300 w-0"></div>
+            </div>
+
+            <!-- Stage Stepper Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 pt-2">
+                <div id="stage-1" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
+                    <div class="stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs">1</div>
+                    <div class="text-xs">
+                        <div class="font-semibold text-slate-700">Hierarchy</div>
+                        <div class="text-slate-500">Fetch API tree</div>
+                    </div>
+                </div>
+                <div id="stage-2" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
+                    <div class="stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs">2</div>
+                    <div class="text-xs">
+                        <div class="font-semibold text-slate-700">Attachments</div>
+                        <div class="text-slate-500">Download assets</div>
+                    </div>
+                </div>
+                <div id="stage-3" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
+                    <div class="stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs">3</div>
+                    <div class="text-xs">
+                        <div class="font-semibold text-slate-700">Conversion</div>
+                        <div class="text-slate-500">HTML to Markdown</div>
+                    </div>
+                </div>
+                <div id="stage-4" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
+                    <div class="stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs">4</div>
+                    <div class="text-xs">
+                        <div class="font-semibold text-slate-700">Packaging</div>
+                        <div class="text-slate-500">Zip archive</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Terminal Log Feed -->
+            <div class="bg-slate-900 rounded-xl p-4 font-mono text-xs text-slate-300 max-h-48 overflow-y-auto space-y-1 shadow-inner border border-slate-800" id="log-terminal">
+                <div class="text-slate-500">[System] Ready for course extraction.</div>
+            </div>
+        </section>
+
+        <!-- Features Overview Grid -->
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                <div>
+                    <div class="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mb-4 text-lg">
+                        <i class="fa-solid fa-sitemap"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-800 text-base mb-2">Folder Hierarchy Preservation</h4>
+                    <p class="text-sm text-slate-600 leading-relaxed">
+                        Recursively scans content folders, modules, and sub-directories to maintain full structural organization locally.
+                    </p>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                <div>
+                    <div class="w-10 h-10 bg-emerald-50 text-emerald-600 rounded-xl flex items-center justify-center mb-4 text-lg">
+                        <i class="fa-solid fa-file-code"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-800 text-base mb-2">Clean Markdown Output</h4>
+                    <p class="text-sm text-slate-600 leading-relaxed">
+                        Converts Blackboard HTML documents, announcements, and assignments into clean, GitHub-flavored Markdown formatting.
+                    </p>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                <div>
+                    <div class="w-10 h-10 bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center mb-4 text-lg">
+                        <i class="fa-solid fa-paperclip"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-800 text-base mb-2">Asset Link Rewriting</h4>
+                    <p class="text-sm text-slate-600 leading-relaxed">
+                        Downloads embedded PDFs, images, and documents into asset subfolders and rewrites hyperlinks into local relative paths.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t border-slate-200 text-slate-500 py-4 text-center text-xs">
+        <div class="max-w-6xl mx-auto px-6">
+            NTULearn Extractor Tool &bull; Powered by FastAPI & LTI 1.3 &bull; Nanyang Technological University
+        </div>
+    </footer>
+
+    <!-- Frontend JavaScript -->
+    <script>
+        let eventSource = null;
+
+        function logToTerminal(message) {
+            const terminal = document.getElementById("log-terminal");
+            const entry = document.createElement("div");
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="text-slate-500">[${timestamp}]</span> ${message}`;
+            terminal.appendChild(entry);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        function updateStageUI(stageNum) {
+            for (let i = 1; i <= 4; i++) {
+                const stageEl = document.getElementById(`stage-${i}`);
+                const icon = stageEl.querySelector(".stage-icon");
+                if (i < stageNum) {
+                    stageEl.className = "border border-emerald-200 rounded-xl p-3 flex items-center space-x-3 bg-emerald-50/50";
+                    icon.className = "stage-icon w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-xs";
+                    icon.innerHTML = '<i class="fa-solid fa-check"></i>';
+                } else if (i === stageNum) {
+                    stageEl.className = "border-2 border-ntuRed rounded-xl p-3 flex items-center space-x-3 bg-red-50/40 shadow-sm";
+                    icon.className = "stage-icon w-8 h-8 rounded-lg bg-ntuRed text-white flex items-center justify-center font-bold text-xs animate-pulse";
+                } else {
+                    stageEl.className = "border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50";
+                    icon.className = "stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs";
+                    icon.innerText = i;
+                }
+            }
+        }
+
+        function startExtraction() {
+            const extractBtn = document.getElementById("extract-btn");
+            const downloadBtn = document.getElementById("download-btn");
+            const progressCard = document.getElementById("progress-card");
+            const progressBar = document.getElementById("progress-bar");
+            const progressPct = document.getElementById("progress-percentage");
+            const statusHeading = document.getElementById("status-heading");
+
+            extractBtn.disabled = true;
+            extractBtn.classList.add("opacity-50", "cursor-not-allowed");
+            progressCard.classList.remove("hidden");
+            downloadBtn.classList.add("hidden");
+
+            logToTerminal("<span class='text-amber-400'>Starting extraction task...</span>");
+            updateStageUI(1);
+
+            const courseId = document.getElementById("course-id").innerText.trim();
+            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}`;
+
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource(sseUrl);
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.stage) {
+                        updateStageUI(data.stage);
+                    }
+
+                    if (data.progress !== undefined) {
+                        const pct = Math.round(data.progress);
+                        progressBar.style.width = `${pct}%`;
+                        progressPct.innerText = `${pct}%`;
+                    }
+
+                    if (data.message) {
+                        logToTerminal(data.message);
+                    }
+
+                    if (data.status === "completed") {
+                        eventSource.close();
+                        statusHeading.innerText = "Extraction Complete!";
+                        document.getElementById("spinner").classList.add("hidden");
+                        updateStageUI(5); // all completed
+
+                        logToTerminal("<span class='text-emerald-400 font-bold'>Extraction package successfully generated!</span>");
+                        
+                        downloadBtn.href = `/api/download/${data.task_id}`;
+                        downloadBtn.classList.remove("hidden");
+                        extractBtn.disabled = false;
+                        extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                    }
+
+                    if (data.status === "error") {
+                        eventSource.close();
+                        statusHeading.innerText = "Extraction Failed";
+                        document.getElementById("spinner").classList.add("hidden");
+                        logToTerminal(`<span class='text-red-400 font-bold'>Error: ${data.message}</span>`);
+                        extractBtn.disabled = false;
+                        extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                    }
+                } catch (e) {
+                    console.error("Error parsing SSE data", e);
+                }
+            };
+
+            eventSource.onerror = function(err) {
+                console.error("EventSource failed:", err);
+                logToTerminal("<span class='text-red-400'>Connection error with extraction stream.</span>");
+                eventSource.close();
+                extractBtn.disabled = false;
+                extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+            };
+        }
+    </script>
+</body>
+</html>
