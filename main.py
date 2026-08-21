@@ -217,6 +217,50 @@ async def lti_jwks():
     return {"keys": []}
 
 
+@app.get("/api/test-auth")
+async def test_blackboard_auth():
+    """
+    Tests live OAuth 2.0 authentication against Blackboard Learn REST API.
+    """
+    import os
+    client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
+    client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
+    base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
+
+    if not client_id or not client_secret:
+        return {
+            "status": "missing_credentials",
+            "message": "BLACKBOARD_CLIENT_ID or BLACKBOARD_CLIENT_SECRET environment variable is missing on Render.",
+            "base_url": base_url,
+            "has_client_id": bool(client_id),
+            "has_client_secret": bool(client_secret),
+        }
+
+    try:
+        async with BlackboardClient(base_url, client_id=client_id, client_secret=client_secret) as bb_client:
+            token = await bb_client.authenticate()
+            return {
+                "status": "success",
+                "message": "Successfully authenticated with Blackboard REST API!",
+                "base_url": base_url,
+                "client_id_prefix": (client_id[:8] + "...") if client_id else None,
+                "access_token_preview": f"{token[:15]}...{token[-10:]}" if token else None,
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Authentication failed: {str(e)}",
+            "base_url": base_url,
+            "client_id_prefix": (client_id[:8] + "...") if client_id else None,
+            "troubleshooting": [
+                "1. Verify BLACKBOARD_CLIENT_ID matches Application ID in developer.anthology.com.",
+                "2. Verify BLACKBOARD_CLIENT_SECRET has no leading/trailing spaces.",
+                "3. Ensure Application ID is authorized in System Admin -> REST API Integrations on Blackboard.",
+                "4. Ensure your Blackboard domain (e.g. ntulearntst.ntu.edu.sg) is listed in Developer Portal app domains."
+            ]
+        }
+
+
 @app.get("/api/extract/stream")
 async def extract_course_stream(
     course_id: str = Query("CCE102-TST"),
