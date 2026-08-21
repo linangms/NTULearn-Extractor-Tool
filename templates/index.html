@@ -120,8 +120,8 @@
                 <div id="stage-3" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
                     <div class="stage-icon w-8 h-8 rounded-lg bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-xs">3</div>
                     <div class="text-xs">
-                        <div class="font-semibold text-slate-700">Conversion</div>
-                        <div class="text-slate-500">HTML to Markdown</div>
+                        <div id="stage-3-title" class="font-semibold text-slate-700">Conversion</div>
+                        <div id="stage-3-desc" class="text-slate-500">HTML to Markdown</div>
                     </div>
                 </div>
                 <div id="stage-4" class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 bg-slate-50 transition-colors">
@@ -232,6 +232,16 @@
             if (extractRawBtn) { extractRawBtn.disabled = true; extractRawBtn.classList.add("opacity-50", "cursor-not-allowed"); }
             progressCard.classList.remove("hidden");
             downloadBtn.classList.add("hidden");
+
+            const stage3Title = document.getElementById("stage-3-title");
+            const stage3Desc = document.getElementById("stage-3-desc");
+            if (mode === "raw") {
+                if (stage3Title) stage3Title.innerText = "Raw Files";
+                if (stage3Desc) stage3Desc.innerText = "Extracting Assets";
+            } else {
+                if (stage3Title) stage3Title.innerText = "Conversion";
+                if (stage3Desc) stage3Desc.innerText = "HTML to Markdown";
+            }
 
             const modeLabel = mode === "raw" ? "Raw Course Files & Attachments" : "Markdown Conversion";
             logToTerminal(`<span class='text-amber-400'>Starting extraction task (${modeLabel})...</span>`);

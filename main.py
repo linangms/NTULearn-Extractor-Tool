@@ -416,16 +416,44 @@ async def extract_course_stream(
                 downloader_func = mock_downloader
 
             converter = CourseMarkdownConverter(course_title, course_id)
-            if mode == "raw":
-                zip_bytes = await converter.build_raw_zip_package(
-                    content_tree=tree,
-                    attachment_downloader=downloader_func,
-                )
-            else:
-                zip_bytes = await converter.build_zip_package(
-                    content_tree=tree,
-                    attachment_downloader=downloader_func,
-                )
+            progress_queue = asyncio.Queue()
+
+            async def progress_cb(msg: str, pct: float):
+                await progress_queue.put((msg, pct))
+
+            async def run_packaging():
+                try:
+                    if mode == "raw":
+                        res = await converter.build_raw_zip_package(
+                            content_tree=tree,
+                            attachment_downloader=downloader_func,
+                            progress_callback=progress_cb,
+                        )
+                    else:
+                        res = await converter.build_zip_package(
+                            content_tree=tree,
+                            attachment_downloader=downloader_func,
+                            progress_callback=progress_cb,
+                        )
+                    await progress_queue.put(None)
+                    return res
+                except Exception as ex:
+                    await progress_queue.put(ex)
+                    return None
+
+            pkg_task = asyncio.create_task(run_packaging())
+
+            while True:
+                q_item = await progress_queue.get()
+                if q_item is None:
+                    break
+                if isinstance(q_item, Exception):
+                    raise q_item
+                msg, pct = q_item
+                calc_pct = min(94, 75 + int(pct * 0.19))
+                yield f"data: {json.dumps({'stage': 3, 'progress': calc_pct, 'message': msg, 'status': 'running'})}\n\n"
+
+            zip_bytes = await pkg_task
 
             yield f"data: {json.dumps({'stage': 4, 'progress': 95, 'message': 'Finalizing Zip package archive...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)

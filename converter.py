@@ -343,9 +343,13 @@ class CourseMarkdownConverter:
                         zip_target_path = f"{current_dir}/{filename}"
 
                         if attachment_downloader and content_id and att_id:
+                            if progress_callback:
+                                await progress_callback(f"Downloading file: {filename}...", pct)
                             try:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
                                 if data:
                                     zf.writestr(zip_target_path, data)
+                                    if progress_callback:
+                                        await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
