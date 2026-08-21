@@ -139,13 +139,25 @@ class CourseMarkdownConverter:
 
                 # Convert description/body if present
                 body = node.get("body") or node.get("description", "")
-                if body and body.strip():
-                    md_text = self.convert_html_to_markdown(body, attachment_map)
-                    md_filename = f"{folder_path}/index.md"
-                    zf.writestr(md_filename, f"# {node.get('title')}\n\n{md_text}")
+                md_text = self.convert_html_to_markdown(body, attachment_map)
+                
+                folder_md = f"# {node.get('title')}\n\n"
+                if md_text:
+                    folder_md += f"{md_text}\n\n"
+
+                children = node.get("children", [])
+                if children:
+                    folder_md += "### Folder Contents\n\n"
+                    for child in children:
+                        child_title = sanitize_filename(child.get("title", "Untitled"))
+                        if child.get("isFolder"):
+                            folder_md += f"- 📁 [{child.get('title')}](./{child_title}/index.md)\n"
+                        else:
+                            folder_md += f"- 📄 [{child.get('title')}](./{child_title}.md)\n"
+
+                zf.writestr(f"{folder_path}/index.md", folder_md)
 
                 # Process children
-                children = node.get("children", [])
                 if children:
                     await self._process_node_list(
                         nodes=children,

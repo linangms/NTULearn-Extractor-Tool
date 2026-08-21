@@ -70,13 +70,17 @@
                         <i class="fa-solid fa-key text-amber-400"></i>
                         <span>Test REST API Auth</span>
                     </button>
-                    <button id="extract-btn" onclick="startExtraction()" class="bg-ntuRed hover:bg-red-700 text-white font-semibold px-6 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95">
+                    <button id="extract-raw-btn" onclick="startExtraction('raw')" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95" title="Download all original raw files, slides, PDFs and documents">
+                        <i class="fa-solid fa-cloud-arrow-down"></i>
+                        <span>Download Raw Course Files (.zip)</span>
+                    </button>
+                    <button id="extract-btn" onclick="startExtraction('markdown')" class="bg-ntuRed hover:bg-red-700 text-white font-semibold px-6 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95" title="Convert all HTML content and items to Markdown documents">
                         <i class="fa-solid fa-wand-magic-sparkles"></i>
-                        <span>Extract & Convert Course to Markdown</span>
+                        <span>Convert ALL to Markdown (.zip)</span>
                     </button>
                     <a id="download-btn" href="#" class="hidden bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95 animate-bounce">
                         <i class="fa-solid fa-file-zipper"></i>
-                        <span>Download Markdown Package (.zip)</span>
+                        <span>Download Zip Package</span>
                     </a>
                 </div>
             </div>
@@ -215,26 +219,28 @@
             }
         }
 
-        function startExtraction() {
+        function startExtraction(mode = "markdown") {
             const extractBtn = document.getElementById("extract-btn");
+            const extractRawBtn = document.getElementById("extract-raw-btn");
             const downloadBtn = document.getElementById("download-btn");
             const progressCard = document.getElementById("progress-card");
             const progressBar = document.getElementById("progress-bar");
             const progressPct = document.getElementById("progress-percentage");
             const statusHeading = document.getElementById("status-heading");
 
-            extractBtn.disabled = true;
-            extractBtn.classList.add("opacity-50", "cursor-not-allowed");
+            if (extractBtn) { extractBtn.disabled = true; extractBtn.classList.add("opacity-50", "cursor-not-allowed"); }
+            if (extractRawBtn) { extractRawBtn.disabled = true; extractRawBtn.classList.add("opacity-50", "cursor-not-allowed"); }
             progressCard.classList.remove("hidden");
             downloadBtn.classList.add("hidden");
 
-            logToTerminal("<span class='text-amber-400'>Starting extraction task...</span>");
+            const modeLabel = mode === "raw" ? "Raw Course Files & Attachments" : "Markdown Conversion";
+            logToTerminal(`<span class='text-amber-400'>Starting extraction task (${modeLabel})...</span>`);
             updateStageUI(1);
 
             const courseIdInput = document.getElementById("course-id-input");
             const courseId = (courseIdInput && courseIdInput.value.trim()) ? courseIdInput.value.trim() : document.getElementById("course-id").innerText.trim();
             const courseTitle = document.getElementById("course-title").innerText.trim();
-            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}`;
+            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}&mode=${encodeURIComponent(mode)}`;
 
             if (eventSource) {
                 eventSource.close();
@@ -270,8 +276,8 @@
                         
                         downloadBtn.href = `/api/download/${data.task_id}`;
                         downloadBtn.classList.remove("hidden");
-                        extractBtn.disabled = false;
-                        extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                        if (extractBtn) { extractBtn.disabled = false; extractBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
+                        if (extractRawBtn) { extractRawBtn.disabled = false; extractRawBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
                     }
 
                     if (data.status === "error") {
@@ -279,8 +285,8 @@
                         statusHeading.innerText = "Extraction Failed";
                         document.getElementById("spinner").classList.add("hidden");
                         logToTerminal(`<span class='text-red-400 font-bold'>Error: ${data.message}</span>`);
-                        extractBtn.disabled = false;
-                        extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                        if (extractBtn) { extractBtn.disabled = false; extractBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
+                        if (extractRawBtn) { extractRawBtn.disabled = false; extractRawBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
                     }
                 } catch (e) {
                     console.error("Error parsing SSE data", e);
@@ -291,8 +297,8 @@
                 console.error("EventSource failed:", err);
                 logToTerminal("<span class='text-red-400'>Connection error with extraction stream.</span>");
                 eventSource.close();
-                extractBtn.disabled = false;
-                extractBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                if (extractBtn) { extractBtn.disabled = false; extractBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
+                if (extractRawBtn) { extractRawBtn.disabled = false; extractRawBtn.classList.remove("opacity-50", "cursor-not-allowed"); }
             };
         }
 

@@ -157,11 +157,17 @@ class BlackboardClient:
             if close_needed:
                 await client.aclose()
 
+    def _format_course_id(self, course_id: str) -> str:
+        if course_id.startswith("_") or course_id.startswith("courseId:"):
+            return course_id
+        return f"courseId:{course_id}"
+
     async def get_course_details(self, course_id: str) -> Dict[str, Any]:
         """
         Retrieves basic details about a course.
         """
-        url = f"{self.base_url}/learn/api/public/v1/courses/{course_id}"
+        fmt_id = self._format_course_id(course_id)
+        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}"
         resp = await self._request_with_retry("GET", url)
         if resp.status_code == 200:
             return resp.json()
@@ -171,10 +177,11 @@ class BlackboardClient:
         """
         Recursively fetches the full content tree for a course.
         """
-        top_url = f"{self.base_url}/learn/api/public/v1/courses/{course_id}/contents"
+        fmt_id = self._format_course_id(course_id)
+        top_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents"
         resp = await self._request_with_retry("GET", top_url)
         if resp.status_code != 200:
-            logger.error(f"Failed to fetch top-level contents for course {course_id}: {resp.status_code}")
+            logger.error(f"Failed to fetch top-level contents for course {course_id} ({fmt_id}): {resp.status_code}")
             return []
 
         data = resp.json()
@@ -213,7 +220,8 @@ class BlackboardClient:
 
         # Recursively fetch children if folder
         if is_folder:
-            child_url = f"{self.base_url}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/children"
+            fmt_id = self._format_course_id(course_id)
+            child_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/children"
             child_resp = await self._request_with_retry("GET", child_url)
             if child_resp.status_code == 200:
                 child_data = child_resp.json()
@@ -225,14 +233,16 @@ class BlackboardClient:
         return node
 
     async def get_content_attachments(self, course_id: str, content_id: str) -> List[Dict[str, Any]]:
-        url = f"{self.base_url}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments"
+        fmt_id = self._format_course_id(course_id)
+        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments"
         resp = await self._request_with_retry("GET", url)
         if resp.status_code == 200:
             return resp.json().get("results", [])
         return []
 
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
-        url = f"{self.base_url}/learn/api/public/v1/courses/{course_id}/contents/{content_id}/attachments/{attachment_id}/download"
+        fmt_id = self._format_course_id(course_id)
+        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments/{attachment_id}/download"
         resp = await self._request_with_retry("GET", url)
         if resp.status_code == 200:
             return resp.content

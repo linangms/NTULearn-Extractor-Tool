@@ -397,23 +397,22 @@ async def extract_course_stream(
             yield f"data: {json.dumps({'stage': 3, 'progress': 75, 'message': f'Converting {course_id} HTML content to Markdown...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            # Simulated mock attachment downloader
-            async def mock_downloader(c_id, content_id, att_id):
-                return f"Simulated attachment binary content for {att_id}".encode("utf-8")
-
-            async def progress_cb(msg, pct):
-                yield_msg = {
-                    'stage': 3,
-                    'progress': 75 + (pct * 0.15),
-                    'message': msg,
-                    'status': 'running'
-                }
-                logger.info(f"Progress update: {msg}")
+            # Define attachment downloader
+            if use_real_api and bb_client_id and bb_client_secret:
+                async def real_downloader(c_id, content_id, att_id):
+                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                        await client.authenticate()
+                        return await client.download_attachment_bytes(c_id, content_id, att_id)
+                downloader_func = real_downloader
+            else:
+                async def mock_downloader(c_id, content_id, att_id):
+                    return f"Simulated attachment binary content for {att_id}".encode("utf-8")
+                downloader_func = mock_downloader
 
             converter = CourseMarkdownConverter(course_title, course_id)
             zip_bytes = await converter.build_zip_package(
                 content_tree=tree,
-                attachment_downloader=mock_downloader,
+                attachment_downloader=downloader_func,
             )
 
             yield f"data: {json.dumps({'stage': 4, 'progress': 95, 'message': 'Finalizing Zip package archive...', 'status': 'running'})}\n\n"
