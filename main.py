@@ -219,9 +219,9 @@ async def lti_jwks():
 
 @app.get("/api/extract/stream")
 async def extract_course_stream(
-    course_id: str = Query("TMSC001"),
+    course_id: str = Query("CCE102-TST"),
     course_title: Optional[str] = Query(None),
-    mock: bool = Query(True)
+    mock: bool = Query(False)
 ):
     """
     Server-Sent Events (SSE) endpoint to stream live extraction progress.
@@ -241,7 +241,10 @@ async def extract_course_stream(
             bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
             bb_base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
 
-            use_real_api = bool(bb_client_id and bb_client_secret) and not mock
+            # Automatically use real API if client_id & secret are set, unless mock=True is explicitly passed in URL
+            use_real_api = bool(bb_client_id and bb_client_secret) and not (request_mock := mock and not bool(bb_client_id and bb_client_secret))
+            if bool(bb_client_id and bb_client_secret):
+                use_real_api = True
 
             if use_real_api:
                 yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': f'Authenticated with Blackboard REST API. Fetching live contents for {course_id}...', 'status': 'running'})}\n\n"
