@@ -30,16 +30,75 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
 
+async def extract_lti_context(request: Request) -> Dict[str, str]:
+    """
+    Extracts LTI claims, course ID, course name, and user role from request payload.
+    """
+    params = dict(request.query_params)
+    form_data = {}
+    if request.method == "POST":
+        try:
+            form = await request.form()
+            form_data = dict(form)
+            params.update(form_data)
+        except Exception as e:
+            logger.debug(f"Could not parse form: {e}")
+
+    id_token = params.get("id_token") or form_data.get("id_token")
+    
+    course_id = params.get("course_id") or params.get("context_id") or params.get("context_label")
+    course_name = params.get("course_name") or params.get("context_title")
+    user_role = "Instructor"
+
+    if id_token:
+        try:
+            import jwt
+            decoded = jwt.decode(id_token, options={"verify_signature": False})
+            logger.info(f"Decoded LTI ID Token claims: {decoded}")
+
+            context_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
+            custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
+            roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
+
+            c_id = context_claim.get("id") or context_claim.get("label") or custom_claim.get("course_id") or custom_claim.get("context_id")
+            c_name = context_claim.get("title") or context_claim.get("label") or custom_claim.get("course_name") or custom_claim.get("context_title")
+
+            if c_id:
+                course_id = str(c_id)
+            if c_name:
+                course_name = str(c_name)
+
+            if roles_claim:
+                if any("Instructor" in r or "Administrator" in r or "ContentDeveloper" in r for r in roles_claim):
+                    user_role = "Instructor"
+                else:
+                    user_role = "Student"
+        except Exception as e:
+            logger.warning(f"Error decoding id_token: {e}")
+
+    if not course_id:
+        course_id = "TMSC001"
+    if not course_name:
+        course_name = f"{course_id} - Course Content" if course_id == "TMSC001" else f"Course {course_id}"
+
+    return {
+        "course_id": course_id,
+        "course_name": course_name,
+        "user_role": user_role,
+    }
+
+
 @app.api_route("/", methods=["GET", "POST"], response_class=HTMLResponse)
 async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     """
     Renders the main dashboard UI.
     """
+    context = await extract_lti_context(request)
     session_data = sessions.get(session_id, {}) if session_id else {}
     
-    course_name = session_data.get("course_name", "CZ4042 - Neural Networks & Deep Learning")
-    course_id = session_data.get("course_id", "NTU_CZ4042_2026_S1")
-    user_role = session_data.get("user_role", "Instructor")
+    course_name = session_data.get("course_name") or context["course_name"]
+    course_id = session_data.get("course_id") or context["course_id"]
+    user_role = session_data.get("user_role") or context["user_role"]
 
     return templates.TemplateResponse(
         request=request,
@@ -70,15 +129,10 @@ async def lti_login(request: Request):
     target_link_uri = params.get("target_link_uri") or str(request.url_for("lti_launch"))
     client_id = params.get("client_id")
     login_hint = params.get("login_hint")
-    lti_message_hint = params.get("lti_message_hint")
 
     logger.info(f"LTI Login initiated from iss={iss}, target={target_link_uri}, client_id={client_id}")
 
-    # Build auth redirect if iss is provided, otherwise direct to target launch
     if iss and login_hint:
-        # Construct Blackboard OIDC authorization redirect URL
-        auth_url = f"{iss.rstrip('/')}/learn/api/public/v1/oauth2/authorizationcode"
-        # Standard fallback to direct launch
         response_html = f"""
         <html>
         <body>
@@ -97,70 +151,17 @@ async def lti_login(request: Request):
 
 
 @app.api_route("/lti/launch", methods=["GET", "POST"])
-async def lti_launch(
-    request: Request,
-    id_token: Optional[str] = Form(None),
-    state: Optional[str] = Form(None)
-):
+async def lti_launch(request: Request):
     """
     LTI 1.3 Launch handler endpoint.
     Extracts course details and user roles from LTI payload.
     """
     session_id = str(uuid.uuid4())
-    
-    # Try parsing form data directly if Form parameter was not populated
-    if not id_token:
-        try:
-            form_data = await request.form()
-            id_token = form_data.get("id_token")
-        except Exception as e:
-            logger.debug(f"Could not read request form data: {e}")
+    context = await extract_lti_context(request)
 
-    # Fallback to query parameters
-    if not id_token:
-        id_token = request.query_params.get("id_token")
-
-    course_id = "NTU_CZ4042_2026_S1"
-    course_name = "CZ4042 - Neural Networks & Deep Learning"
-    user_role = "Instructor"
-
-    if id_token:
-        try:
-            import jwt
-            decoded = jwt.decode(id_token, options={"verify_signature": False})
-            logger.info(f"Decoded LTI ID Token claims: {decoded}")
-
-            context_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
-            custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
-            roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
-
-            # Extract course ID
-            if context_claim.get("id"):
-                course_id = context_claim["id"]
-            elif context_claim.get("label"):
-                course_id = context_claim["label"]
-            elif custom_claim.get("course_id"):
-                course_id = custom_claim["course_id"]
-
-            # Extract course Name / Title
-            if context_claim.get("title"):
-                course_name = context_claim["title"]
-            elif context_claim.get("label"):
-                course_name = context_claim["label"]
-            elif custom_claim.get("course_name"):
-                course_name = custom_claim["course_name"]
-
-            # Extract User Role
-            if roles_claim:
-                if any("Instructor" in r or "Administrator" in r or "ContentDeveloper" in r for r in roles_claim):
-                    user_role = "Instructor"
-                else:
-                    user_role = "Student"
-
-        except Exception as e:
-            logger.warning(f"Could not parse LTI ID Token claims: {e}", exc_info=True)
-    else:
-        logger.warning("No id_token found in LTI launch request.")
+    course_id = context["course_id"]
+    course_name = context["course_name"]
+    user_role = context["user_role"]
 
     sessions[session_id] = {
         "course_id": course_id,
