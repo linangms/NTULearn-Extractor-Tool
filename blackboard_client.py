@@ -54,35 +54,44 @@ class BlackboardClient:
         if not self.client_id or not self.client_secret:
             raise ValueError("Client ID and Client Secret required for OAuth2 authentication.")
 
+        client_id = self.client_id.strip()
+        client_secret = self.client_secret.strip()
+
         url = f"{self.base_url}/learn/api/public/v1/oauth2/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
         client = self._client or httpx.AsyncClient()
         try:
-            # Attempt 1: HTTP Basic Auth
+            # Attempt 1: HTTP Basic Auth with grant_type=client_credentials
             response = await client.post(
                 url,
                 data={"grant_type": "client_credentials"},
                 headers=headers,
-                auth=(self.client_id, self.client_secret),
+                auth=(client_id, client_secret),
             )
 
-            # Attempt 2: Form Body Auth if Basic Auth returns 401
-            if response.status_code == 401:
-                logger.info("Basic Auth returned 401, attempting Client Credentials in Form Body...")
+            # Attempt 2: Form Body parameters if Attempt 1 fails
+            if response.status_code != 200:
+                logger.info(f"Attempt 1 returned {response.status_code}, trying Form Body credentials...")
                 response = await client.post(
                     url,
                     data={
                         "grant_type": "client_credentials",
-                        "client_id": self.client_id,
-                        "client_secret": self.client_secret,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                     },
                     headers=headers,
                 )
 
             if response.status_code != 200:
-                logger.error(f"Blackboard OAuth token request failed ({response.status_code}): {response.text}")
-                response.raise_for_status()
+                err_detail = response.text
+                try:
+                    err_json = response.json()
+                    err_detail = err_json.get("error_description") or err_json.get("error") or response.text
+                except Exception:
+                    pass
+                logger.error(f"Blackboard OAuth token request failed ({response.status_code}): {err_detail}")
+                raise Exception(f"HTTP {response.status_code}: {err_detail}")
 
             token_data = response.json()
             self.access_token = token_data.get("access_token")
