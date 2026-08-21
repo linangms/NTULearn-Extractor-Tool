@@ -32,7 +32,7 @@ BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
 async def extract_lti_context(request: Request) -> Dict[str, str]:
     """
-    Extracts LTI claims, course ID, course name, and user role from request payload.
+    Extracts LTI claims, course ID, course name, and user role from request payload and referer headers.
     """
     params = dict(request.query_params)
     form_data = {}
@@ -46,7 +46,13 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
     id_token = params.get("id_token") or form_data.get("id_token")
     
-    course_id = params.get("course_id") or params.get("context_id") or params.get("context_label")
+    course_id = (
+        params.get("course_id") 
+        or params.get("context_label") 
+        or params.get("context_id") 
+        or params.get("custom_course_id")
+        or params.get("lis_course_offering_sourcedid")
+    )
     course_name = params.get("course_name") or params.get("context_title")
     user_role = "Instructor"
 
@@ -60,8 +66,19 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
             roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
 
-            c_id = context_claim.get("id") or context_claim.get("label") or custom_claim.get("course_id") or custom_claim.get("context_id")
-            c_name = context_claim.get("title") or context_claim.get("label") or custom_claim.get("course_name") or custom_claim.get("context_title")
+            c_id = (
+                context_claim.get("label") 
+                or context_claim.get("id") 
+                or custom_claim.get("course_id") 
+                or custom_claim.get("context_id") 
+                or custom_claim.get("CourseSection.id")
+            )
+            c_name = (
+                context_claim.get("title") 
+                or context_claim.get("label") 
+                or custom_claim.get("course_name") 
+                or custom_claim.get("context_title")
+            )
 
             if c_id:
                 course_id = str(c_id)
@@ -76,10 +93,21 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         except Exception as e:
             logger.warning(f"Error decoding id_token: {e}")
 
-    if not course_id:
-        course_id = "TMSC001"
-    if not course_name:
-        course_name = f"{course_id} - Course Content" if course_id == "TMSC001" else f"Course {course_id}"
+    # Inspect HTTP Referer header if course_id is still unknown
+    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1"]:
+        referer = request.headers.get("referer", "")
+        import re
+        match = re.search(r'/courses/([^/]+)', referer)
+        if match:
+            extracted = match.group(1)
+            logger.info(f"Extracted course_id '{extracted}' from Referer header: {referer}")
+            course_id = extracted
+
+    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1"]:
+        course_id = "CCE102-TST"
+
+    if not course_name or "CZ4042" in course_name or "TMSC001" in course_name:
+        course_name = f"{course_id} - Course Materials"
 
     return {
         "course_id": course_id,

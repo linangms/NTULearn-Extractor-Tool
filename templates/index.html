@@ -56,8 +56,11 @@
                     <h2 class="text-2xl font-extrabold text-slate-900" id="course-title">
                         {{ course_name if course_name else "CZ4042 - Neural Networks & Deep Learning" }}
                     </h2>
-                    <p class="text-sm text-slate-500 mt-1 flex items-center gap-4">
-                        <span><i class="fa-solid fa-hashtag text-slate-400 mr-1"></i> Course ID: <strong id="course-id" class="text-slate-700">{{ course_id if course_id else "NTU_CZ4042_2026_S1" }}</strong></span>
+                    <p class="text-sm text-slate-500 mt-2 flex flex-wrap items-center gap-4">
+                        <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
+                            <input id="course-id-input" type="text" value="{{ course_id if course_id else 'CCE102-TST' }}" class="ml-1.5 px-2 py-0.5 text-sm font-bold text-slate-800 bg-slate-100 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-36" title="Click to edit Course ID if needed" />
+                            <span id="course-id" class="hidden">{{ course_id if course_id else 'CCE102-TST' }}</span>
+                        </span>
                         <span><i class="fa-solid fa-user-tie text-slate-400 mr-1"></i> User Role: <strong class="text-slate-700">{{ user_role if user_role else "Instructor" }}</strong></span>
                     </p>
                 </div>
@@ -224,7 +227,8 @@
             logToTerminal("<span class='text-amber-400'>Starting extraction task...</span>");
             updateStageUI(1);
 
-            const courseId = document.getElementById("course-id").innerText.trim();
+            const courseIdInput = document.getElementById("course-id-input");
+            const courseId = (courseIdInput && courseIdInput.value.trim()) ? courseIdInput.value.trim() : document.getElementById("course-id").innerText.trim();
             const courseTitle = document.getElementById("course-title").innerText.trim();
             const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}`;
 
