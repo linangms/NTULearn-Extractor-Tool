@@ -30,7 +30,7 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "POST"], response_class=HTMLResponse)
 async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     """
     Renders the main dashboard UI.
@@ -53,21 +53,27 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     )
 
 
-@app.get("/lti/login")
+@app.api_route("/lti/login", methods=["GET", "POST"])
 async def lti_login(request: Request):
     """
     LTI 1.3 OIDC login initiation route.
     """
-    # Simple OIDC initiation mock / proxy
-    iss = request.query_params.get("iss")
-    target_link_uri = request.query_params.get("target_link_uri", str(request.url_for("dashboard")))
-    login_hint = request.query_params.get("login_hint")
+    params = request.query_params
+    if request.method == "POST":
+        try:
+            form_data = await request.form()
+            params = form_data
+        except Exception:
+            pass
+
+    iss = params.get("iss")
+    target_link_uri = params.get("target_link_uri", str(request.url_for("dashboard")))
     
     logger.info(f"LTI Login initiated from iss={iss}, target={target_link_uri}")
     return HTMLResponse(content=f"<html><body><p>Redirecting to LTI Launch...</p><script>window.location.href='{target_link_uri}';</script></body></html>")
 
 
-@app.post("/lti/launch")
+@app.api_route("/lti/launch", methods=["GET", "POST"])
 async def lti_launch(
     request: Request,
     id_token: Optional[str] = Form(None),
@@ -79,7 +85,10 @@ async def lti_launch(
     """
     session_id = str(uuid.uuid4())
     
-    # Extract details from launch request
+    # Check if id_token came in query params for GET requests
+    if not id_token and request.method == "GET":
+        id_token = request.query_params.get("id_token")
+
     course_id = "NTU_CZ4042_2026_S1"
     course_name = "CZ4042 - Neural Networks & Deep Learning"
     user_role = "Instructor"
