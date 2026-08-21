@@ -175,20 +175,27 @@ class CourseMarkdownConverter:
                     node, attachments_dir, zf, attachment_downloader
                 )
 
-                body = node.get("body") or node.get("description", "")
+                body = (
+                    node.get("body")
+                    or node.get("description")
+                    or node.get("instructions")
+                    or node.get("summary")
+                    or node.get("formattedBody")
+                    or ""
+                )
                 md_text = self.convert_html_to_markdown(body, attachment_map)
 
                 full_md = f"# {node.get('title')}\n\n"
-                if md_text:
+                if md_text and md_text.strip():
                     full_md += f"{md_text}\n\n"
 
                 # Add link list for attached files at the bottom
                 if node.get("attachments"):
-                    full_md += "### Attached Files\n\n"
+                    full_md += "### Attached Files & Resources\n\n"
                     for att in node["attachments"]:
                         att_name = sanitize_filename(att.get("fileName", "attachment"))
                         rel_link = f"./attachments/{att_name}"
-                        full_md += f"- [{att.get('fileName', 'attachment')}]({rel_link})\n"
+                        full_md += f"- 📎 [{att.get('fileName', 'attachment')}]({rel_link})\n"
 
                 file_path = f"{current_dir}/{title}.md"
                 zf.writestr(file_path, full_md)
@@ -302,7 +309,3 @@ class CourseMarkdownConverter:
                                     zf.writestr(zip_target_path, data)
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
-                else:
-                    body = node.get("body") or node.get("description", "")
-                    if body and body.strip():
-                        zf.writestr(f"{current_dir}/{title}.html", f"<h1>{node.get('title')}</h1>\n{body}")

@@ -221,8 +221,21 @@ class BlackboardClient:
         # Retrieve direct attachments for document / assignment items
         attachments = await self.get_content_attachments(course_id, content_id)
         
+        # Also check item.links array for WebDAV / File resources
+        for lk in item.get("links", []):
+            href = lk.get("href", "")
+            if href and ("/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg"])):
+                title_name = lk.get("title") or title
+                full_download_url = href if href.startswith("http") else f"{self.base_url}{href}"
+                attachments.append({
+                    "id": f"link_{content_id}_{len(attachments)+1}",
+                    "fileName": title_name,
+                    "downloadUrl": full_download_url,
+                    "originalUrl": href,
+                })
+
         # Also extract embedded file links from body/description HTML
-        body_html = item.get("body") or item.get("description", "")
+        body_html = item.get("body") or item.get("description") or item.get("instructions") or ""
         if body_html:
             try:
                 from bs4 import BeautifulSoup
@@ -233,13 +246,13 @@ class BlackboardClient:
                     href = a_tag["href"]
                     link_text = a_tag.get_text(strip=True) or f"File_{idx+1}"
                     # Check if link points to a webdav file or attachment document
-                    if "/bbcswebdav/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4", ".m4a"]):
+                    if "/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4", ".m4a"]):
                         idx += 1
                         filename = link_text
                         if not any(filename.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4"]):
                             parsed_path = urllib.parse.urlparse(href).path
                             url_filename = parsed_path.split("/")[-1]
-                            if url_filename:
+                            if url_filename and "." in url_filename:
                                 filename = url_filename
                         
                         full_download_url = href if href.startswith("http") else f"{self.base_url}{href}"

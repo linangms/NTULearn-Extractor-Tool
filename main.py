@@ -395,7 +395,12 @@ async def extract_course_stream(
             yield f"data: {json.dumps({'stage': 2, 'progress': 50, 'message': f'Content tree parsed for {course_id}. Downloading attachments...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            yield f"data: {json.dumps({'stage': 3, 'progress': 75, 'message': f'Converting {course_id} HTML content to Markdown...', 'status': 'running'})}\n\n"
+            if mode == "raw":
+                stage3_msg = f"Downloading raw course files, slides, PDFs, and documents for {course_id}..."
+            else:
+                stage3_msg = f"Converting {course_id} HTML content and documents to Markdown..."
+
+            yield f"data: {json.dumps({'stage': 3, 'progress': 75, 'message': stage3_msg, 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
             # Define attachment downloader
