@@ -48,12 +48,14 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     
     course_id = (
         params.get("course_id") 
+        or params.get("courseId")
+        or params.get("course")
         or params.get("context_label") 
         or params.get("context_id") 
         or params.get("custom_course_id")
         or params.get("lis_course_offering_sourcedid")
     )
-    course_name = params.get("course_name") or params.get("context_title")
+    course_name = params.get("course_name") or params.get("context_title") or params.get("title")
     user_role = "Instructor"
 
     if id_token:
@@ -93,22 +95,27 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         except Exception as e:
             logger.warning(f"Error decoding id_token: {e}")
 
-    # Inspect HTTP Referer header if course_id is still unknown
+    # Inspect HTTP Referer header or Request URL if course_id is missing or default
     if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1"]:
-        referer = request.headers.get("referer", "")
+        referer = request.headers.get("referer", "") or str(request.url)
         import re
-        match = re.search(r'/courses/([^/]+)', referer)
+        match = (
+            re.search(r'/courses/([^/?]+)', referer)
+            or re.search(r'course_id=([^&]+)', referer, re.IGNORECASE)
+            or re.search(r'courseId=([^&]+)', referer, re.IGNORECASE)
+        )
         if match:
             extracted = match.group(1)
-            logger.info(f"Extracted course_id '{extracted}' from Referer header: {referer}")
+            logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
-    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1"]:
+    if not course_id:
         course_id = "CCE102-TST"
 
     if not course_name or "CZ4042" in course_name or "TMSC001" in course_name:
         course_name = f"{course_id} - Course Materials"
 
+    logger.info(f"Resolved LTI context: course_id='{course_id}', course_name='{course_name}', role='{user_role}'")
     return {
         "course_id": course_id,
         "course_name": course_name,
@@ -463,6 +470,7 @@ async def extract_course_stream(
                 "course_id": course_id,
                 "course_title": course_title,
                 "zip_bytes": zip_bytes,
+                "mode": mode,
             }
 
             yield f"data: {json.dumps({'stage': 4, 'progress': 100, 'message': 'Extraction completed successfully!', 'status': 'completed', 'task_id': task_id})}\n\n"
@@ -477,14 +485,20 @@ async def extract_course_stream(
 @app.get("/api/download/{task_id}")
 async def download_package(task_id: str):
     """
-    Triggers download of the generated Markdown .zip package.
+    Triggers download of the generated .zip package.
     """
     task = task_storage.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Download package not found or expired.")
 
     zip_bytes = task["zip_bytes"]
-    filename = f"{task['course_id']}_markdown_package.zip"
+    mode = task.get("mode", "markdown")
+    course_id = sanitize_filename(task.get("course_id", "course"))
+
+    if mode == "raw":
+        filename = f"{course_id}_package.zip"
+    else:
+        filename = f"{course_id}_markdown_package.zip"
 
     return Response(
         content=zip_bytes,
