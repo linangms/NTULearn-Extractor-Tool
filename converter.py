@@ -329,8 +329,29 @@ class CourseMarkdownConverter:
             title = sanitize_filename(node.get("title", "Untitled"))
             is_folder = node.get("isFolder", False)
 
+            attachments = node.get("attachments", [])
+            content_id = node.get("id")
+
             if is_folder:
                 folder_path = f"{current_dir}/{title}"
+                # Process attachments on the folder itself
+                if attachments:
+                    for att in attachments:
+                        att_id = att.get("downloadUrl") or att.get("id")
+                        filename = sanitize_filename(att.get("fileName", f"file_{att.get('id')}"))
+                        zip_target_path = f"{folder_path}/{filename}"
+                        if attachment_downloader and content_id and att_id:
+                            if progress_callback:
+                                await progress_callback(f"Downloading file: {filename}...", pct)
+                            try:
+                                data = await attachment_downloader(self.course_id, content_id, att_id)
+                                if data:
+                                    zf.writestr(zip_target_path, data)
+                                    if progress_callback:
+                                        await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                            except Exception as e:
+                                logger.error(f"Failed to download folder attachment {filename}: {e}")
+
                 children = node.get("children", [])
                 if children:
                     await self._process_raw_node_list(
@@ -344,8 +365,6 @@ class CourseMarkdownConverter:
                     )
             else:
                 # Raw attachments placed directly into current_dir
-                attachments = node.get("attachments", [])
-                content_id = node.get("id")
                 if attachments:
                     for att in attachments:
                         att_id = att.get("downloadUrl") or att.get("id")
@@ -363,3 +382,8 @@ class CourseMarkdownConverter:
                                         await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
+                else:
+                    # Fallback for content items with no attachments: save body HTML if present
+                    body = node.get("body") or node.get("description") or node.get("instructions") or ""
+                    if body and body.strip():
+                        zf.writestr(f"{current_dir}/{title}.html", f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title></head><body><h1>{node.get('title')}</h1>{body}</body></html>")

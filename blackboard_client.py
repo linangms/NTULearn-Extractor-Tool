@@ -107,8 +107,9 @@ class BlackboardClient:
         """
         Executes HTTP request with exponential backoff for HTTP 429 rate limits.
         """
-        client = self._client or httpx.AsyncClient()
+        client = self._client or httpx.AsyncClient(follow_redirects=True)
         close_needed = self._client is None
+        kwargs.setdefault("follow_redirects", True)
 
         headers = self._get_headers()
         if "headers" in kwargs:
@@ -316,7 +317,8 @@ class BlackboardClient:
             fmt_id = self._format_course_id(course_id)
             url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments/{attachment_id}/download"
             
-        resp = await self._request_with_retry("GET", url)
+        resp = await self._request_with_retry("GET", url, follow_redirects=True)
         if resp.status_code == 200:
             return resp.content
+        logger.error(f"Failed to download attachment {attachment_id} (URL: {url}): HTTP status {resp.status_code}")
         return None
