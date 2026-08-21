@@ -56,17 +56,34 @@ class BlackboardClient:
 
         url = f"{self.base_url}/learn/api/public/v1/oauth2/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        data = {"grant_type": "client_credentials"}
 
         client = self._client or httpx.AsyncClient()
         try:
+            # Attempt 1: HTTP Basic Auth
             response = await client.post(
                 url,
-                data=data,
+                data={"grant_type": "client_credentials"},
                 headers=headers,
                 auth=(self.client_id, self.client_secret),
             )
-            response.raise_for_status()
+
+            # Attempt 2: Form Body Auth if Basic Auth returns 401
+            if response.status_code == 401:
+                logger.info("Basic Auth returned 401, attempting Client Credentials in Form Body...")
+                response = await client.post(
+                    url,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                    },
+                    headers=headers,
+                )
+
+            if response.status_code != 200:
+                logger.error(f"Blackboard OAuth token request failed ({response.status_code}): {response.text}")
+                response.raise_for_status()
+
             token_data = response.json()
             self.access_token = token_data.get("access_token")
             logger.info("Successfully authenticated with Blackboard REST API.")
