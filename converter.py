@@ -274,6 +274,14 @@ class CourseMarkdownConverter:
 
         return mapping, doc_text_map
 
+    def _count_nodes(self, nodes: List[Dict[str, Any]]) -> int:
+        count = 0
+        for node in nodes:
+            count += 1
+            if node.get("children"):
+                count += self._count_nodes(node["children"])
+        return count
+
     async def build_raw_zip_package(
         self,
         content_tree: List[Dict[str, Any]],
@@ -282,14 +290,16 @@ class CourseMarkdownConverter:
     ) -> bytes:
         """
         Builds a ZIP package containing ONLY raw course files, PDFs, slides, and documents.
+        Bypasses all Markdown conversion completely.
         """
         zip_buffer = io.BytesIO()
         total_nodes = self._count_nodes(content_tree)
+        root_dir = sanitize_filename(f"{self.course_id}_RawFiles")
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             await self._process_raw_node_list(
                 nodes=content_tree,
-                current_dir=self.root_folder_name,
+                current_dir=root_dir,
                 zf=zf,
                 attachment_downloader=attachment_downloader,
                 progress_callback=progress_callback,
