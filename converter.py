@@ -266,10 +266,13 @@ class CourseMarkdownConverter:
                         data = await downloader(self.course_id, content_id, download_key)
                         if data:
                             zf.writestr(zip_target_path, data)
+                            extracted_text = extract_text_from_file_bytes(data, filename)
+                            if extracted_text and extracted_text.strip():
+                                doc_text_map[filename] = extracted_text
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
 
-        return mapping
+        return mapping, doc_text_map
 
     async def build_raw_zip_package(
         self,
