@@ -191,7 +191,8 @@ async def lti_jwks():
 
 @app.get("/api/extract/stream")
 async def extract_course_stream(
-    course_id: str = Query("NTU_CZ4042_2026_S1"),
+    course_id: str = Query("TMSC001"),
+    course_title: Optional[str] = Query(None),
     mock: bool = Query(True)
 ):
     """
@@ -201,82 +202,90 @@ async def extract_course_stream(
 
     async def event_generator():
         try:
-            yield f"data: {json.dumps({'stage': 1, 'progress': 10, 'message': 'Connecting to Blackboard REST API...', 'status': 'running'})}\n\n"
+            yield f"data: {json.dumps({'stage': 1, 'progress': 10, 'message': f'Connecting to Blackboard REST API for course {course_id}...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            course_title = "CZ4042 - Neural Networks & Deep Learning"
+            display_title = course_title or f"{course_id} - Course Materials"
 
-            if mock or course_id.startswith("NTU_") or course_id == "mock":
-                # Simulated REST response content hierarchy
-                yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': 'Fetching top-level course contents...', 'status': 'running'})}\n\n"
+            # Check if environment variables for real Blackboard REST API exist
+            import os
+            bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
+            bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
+            bb_base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
+
+            use_real_api = bool(bb_client_id and bb_client_secret) and not mock
+
+            if use_real_api:
+                yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': f'Authenticated with Blackboard REST API. Fetching live contents for {course_id}...', 'status': 'running'})}\n\n"
+                async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
+                    await bb_client.authenticate()
+                    tree = await bb_client.get_contents_tree(course_id)
+                    details = await bb_client.get_course_details(course_id)
+                    display_title = details.get("name") or display_title
+            else:
+                # Dynamic content tree matching the launched course ID and Title
+                yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': f'Parsing content hierarchy for {course_id}...', 'status': 'running'})}\n\n"
                 await asyncio.sleep(0.5)
 
                 tree = [
                     {
-                        "id": "item_1",
-                        "title": "Course Overview & Syllabus",
+                        "id": f"{course_id}_overview",
+                        "title": f"{course_id} - Course Overview & Syllabus",
                         "isFolder": False,
-                        "body": "<h2>Welcome to CZ4042</h2><p>This course covers deep learning architectures, CNNs, RNNs, and Transformers.</p><p>Download the syllabus below:</p><p><a href='/bbcswebdav/xid-101_1'>Syllabus_2026.pdf</a></p>",
+                        "body": f"<h2>Welcome to {display_title}</h2><p>This document contains all course information, learning outcomes, and grading rubrics for {course_id}.</p><p>Download the official syllabus below:</p><p><a href='/bbcswebdav/xid-{course_id}_syllabus'>{course_id}_Syllabus_2026.pdf</a></p>",
                         "attachments": [
-                            {"id": "att_1", "fileName": "Syllabus_2026.pdf", "originalUrl": "/bbcswebdav/xid-101_1"}
+                            {"id": f"att_{course_id}_1", "fileName": f"{course_id}_Syllabus_2026.pdf", "originalUrl": f"/bbcswebdav/xid-{course_id}_syllabus"}
                         ]
                     },
                     {
-                        "id": "item_2",
-                        "title": "Lectures & Slides",
+                        "id": f"{course_id}_lectures",
+                        "title": f"{course_id} - Lecture Notes & Slides",
                         "isFolder": True,
-                        "body": "<p>All lecture notes for Sem 1.</p>",
+                        "body": f"<p>All lecture materials and slide decks for {course_id}.</p>",
                         "children": [
                             {
-                                "id": "item_2_1",
-                                "title": "Week 1 - Introduction to Perceptrons",
+                                "id": f"{course_id}_lec1",
+                                "title": f"Week 1 - Introduction to {course_id}",
                                 "isFolder": False,
-                                "body": "<h3>Lecture 1 Notes</h3><p>Introduction to linear classifiers and activation functions.</p>",
+                                "body": f"<h3>{course_id} Lecture 1 Notes</h3><p>Overview of fundamental concepts, prerequisites, and foundational principles.</p>",
                                 "attachments": [
-                                    {"id": "att_2_1", "fileName": "Lecture1_Slides.pdf", "originalUrl": "/bbcswebdav/xid-102_1"}
+                                    {"id": f"att_{course_id}_2", "fileName": f"{course_id}_Lecture1_Slides.pdf", "originalUrl": f"/bbcswebdav/xid-{course_id}_lec1"}
                                 ]
                             },
                             {
-                                "id": "item_2_2",
-                                "title": "Week 2 - Backpropagation & Gradient Descent",
+                                "id": f"{course_id}_lec2",
+                                "title": f"Week 2 - Advanced Topics in {course_id}",
                                 "isFolder": False,
-                                "body": "<h3>Lecture 2 Notes</h3><p>Derivation of backpropagation algorithm with chain rule examples.</p>",
+                                "body": f"<h3>{course_id} Lecture 2 Notes</h3><p>In-depth discussion on core algorithms, models, and practical applications.</p>",
                                 "attachments": [
-                                    {"id": "att_2_2", "fileName": "Lecture2_Slides.pdf", "originalUrl": "/bbcswebdav/xid-103_1"}
+                                    {"id": f"att_{course_id}_3", "fileName": f"{course_id}_Lecture2_Slides.pdf", "originalUrl": f"/bbcswebdav/xid-{course_id}_lec2"}
                                 ]
                             }
                         ]
                     },
                     {
-                        "id": "item_3",
-                        "title": "Assignments & Lab Projects",
+                        "id": f"{course_id}_assignments",
+                        "title": f"{course_id} - Assignments & Lab Projects",
                         "isFolder": True,
-                        "body": "<p>Lab assignments and submission guidelines.</p>",
+                        "body": f"<p>Coursework, lab instructions, and submission requirements for {course_id}.</p>",
                         "children": [
                             {
-                                "id": "item_3_1",
-                                "title": "Lab 1 - PyTorch Basics & Image Classification",
+                                "id": f"{course_id}_lab1",
+                                "title": f"Lab Assignment 1 - {course_id} Practical Exercise",
                                 "isFolder": False,
-                                "body": "<p>Implement a ResNet model using PyTorch on CIFAR-10.</p>",
+                                "body": f"<p>Complete the practical lab assignment for {course_id} and submit code scripts and report.</p>",
                                 "attachments": [
-                                    {"id": "att_3_1", "fileName": "Lab1_Instructions.pdf", "originalUrl": "/bbcswebdav/xid-104_1"}
+                                    {"id": f"att_{course_id}_4", "fileName": f"{course_id}_Lab1_Instructions.pdf", "originalUrl": f"/bbcswebdav/xid-{course_id}_lab1"}
                                 ]
                             }
                         ]
                     }
                 ]
-            else:
-                # Real API call with BlackboardClient
-                async with BlackboardClient(BLACKBOARD_BASE_URL) as bb_client:
-                    yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': f'Requesting content tree for course {course_id}...', 'status': 'running'})}\n\n"
-                    tree = await bb_client.get_contents_tree(course_id)
-                    details = await bb_client.get_course_details(course_id)
-                    course_title = details.get("name", course_title)
 
-            yield f"data: {json.dumps({'stage': 2, 'progress': 50, 'message': 'Content tree parsed. Downloading attachments...', 'status': 'running'})}\n\n"
+            yield f"data: {json.dumps({'stage': 2, 'progress': 50, 'message': f'Content tree parsed for {course_id}. Downloading attachments...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            yield f"data: {json.dumps({'stage': 3, 'progress': 75, 'message': 'Converting HTML content to Markdown...', 'status': 'running'})}\n\n"
+            yield f"data: {json.dumps({'stage': 3, 'progress': 75, 'message': f'Converting {course_id} HTML content to Markdown...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
             # Simulated mock attachment downloader

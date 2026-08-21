@@ -225,7 +225,8 @@
             updateStageUI(1);
 
             const courseId = document.getElementById("course-id").innerText.trim();
-            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}`;
+            const courseTitle = document.getElementById("course-title").innerText.trim();
+            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}`;
 
             if (eventSource) {
                 eventSource.close();
