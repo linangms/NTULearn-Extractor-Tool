@@ -265,6 +265,7 @@ async def test_blackboard_auth():
 async def extract_course_stream(
     course_id: str = Query("CCE102-TST"),
     course_title: Optional[str] = Query(None),
+    mode: str = Query("markdown"),
     mock: bool = Query(False)
 ):
     """
@@ -410,10 +411,16 @@ async def extract_course_stream(
                 downloader_func = mock_downloader
 
             converter = CourseMarkdownConverter(course_title, course_id)
-            zip_bytes = await converter.build_zip_package(
-                content_tree=tree,
-                attachment_downloader=downloader_func,
-            )
+            if mode == "raw":
+                zip_bytes = await converter.build_raw_zip_package(
+                    content_tree=tree,
+                    attachment_downloader=downloader_func,
+                )
+            else:
+                zip_bytes = await converter.build_zip_package(
+                    content_tree=tree,
+                    attachment_downloader=downloader_func,
+                )
 
             yield f"data: {json.dumps({'stage': 4, 'progress': 95, 'message': 'Finalizing Zip package archive...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)

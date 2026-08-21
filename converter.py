@@ -215,12 +215,94 @@ class CourseMarkdownConverter:
             original_url = att.get("originalUrl") or att.get("downloadUrl") or att_id
             mapping[original_url] = rel_path
 
-            if downloader and content_id and att_id:
-                try:
-                    data = await downloader(self.course_id, content_id, att_id)
-                    if data:
-                        zf.writestr(zip_target_path, data)
-                except Exception as e:
-                    logger.error(f"Failed to download attachment {filename}: {e}")
+            if downloader and content_id:
+                download_key = att.get("downloadUrl") or att_id
+                if download_key:
+                    try:
+                        data = await downloader(self.course_id, content_id, download_key)
+                        if data:
+                            zf.writestr(zip_target_path, data)
+                    except Exception as e:
+                        logger.error(f"Failed to download attachment {filename}: {e}")
 
         return mapping
+
+    async def build_raw_zip_package(
+        self,
+        content_tree: List[Dict[str, Any]],
+        attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        progress_callback: Optional[Callable[[str, float], Any]] = None,
+    ) -> bytes:
+        """
+        Builds a ZIP package containing ONLY raw course files, PDFs, slides, and documents.
+        """
+        zip_buffer = io.BytesIO()
+        total_nodes = self._count_nodes(content_tree)
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            await self._process_raw_node_list(
+                nodes=content_tree,
+                current_dir=self.root_folder_name,
+                zf=zf,
+                attachment_downloader=attachment_downloader,
+                progress_callback=progress_callback,
+                processed_count=[0],
+                total_nodes=total_nodes,
+            )
+
+        zip_buffer.seek(0)
+        return zip_buffer.getvalue()
+
+    async def _process_raw_node_list(
+        self,
+        nodes: List[Dict[str, Any]],
+        current_dir: str,
+        zf: zipfile.ZipFile,
+        attachment_downloader: Optional[Callable],
+        progress_callback: Optional[Callable],
+        processed_count: List[int],
+        total_nodes: int,
+    ):
+        for node in nodes:
+            processed_count[0] += 1
+            pct = (processed_count[0] / max(1, total_nodes)) * 100
+            if progress_callback:
+                await progress_callback(f"Downloading raw files for: {node.get('title', 'Untitled')}", pct)
+
+            title = sanitize_filename(node.get("title", "Untitled"))
+            is_folder = node.get("isFolder", False)
+
+            if is_folder:
+                folder_path = f"{current_dir}/{title}"
+                children = node.get("children", [])
+                if children:
+                    await self._process_raw_node_list(
+                        nodes=children,
+                        current_dir=folder_path,
+                        zf=zf,
+                        attachment_downloader=attachment_downloader,
+                        progress_callback=progress_callback,
+                        processed_count=processed_count,
+                        total_nodes=total_nodes,
+                    )
+            else:
+                # Raw attachments placed directly into current_dir
+                attachments = node.get("attachments", [])
+                content_id = node.get("id")
+                if attachments:
+                    for att in attachments:
+                        att_id = att.get("downloadUrl") or att.get("id")
+                        filename = sanitize_filename(att.get("fileName", f"file_{att.get('id')}"))
+                        zip_target_path = f"{current_dir}/{filename}"
+
+                        if attachment_downloader and content_id and att_id:
+                            try:
+                                data = await attachment_downloader(self.course_id, content_id, att_id)
+                                if data:
+                                    zf.writestr(zip_target_path, data)
+                            except Exception as e:
+                                logger.error(f"Failed to download raw attachment {filename}: {e}")
+                else:
+                    body = node.get("body") or node.get("description", "")
+                    if body and body.strip():
+                        zf.writestr(f"{current_dir}/{title}.html", f"<h1>{node.get('title')}</h1>\n{body}")

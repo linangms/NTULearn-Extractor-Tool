@@ -198,7 +198,11 @@ class BlackboardClient:
         content_id = item.get("id")
         title = item.get("title", "Untitled Content")
         handler = item.get("contentHandler", {}).get("id", "")
-        is_folder = item.get("folder", {}).get("isFolder", False) or "folder" in handler.lower()
+        is_folder = (
+            item.get("folder", {}).get("isFolder", False)
+            or item.get("hasChildren", False)
+            or any(k in handler.lower() for k in ["folder", "module", "lesson", "chapter", "unit", "outline", "section"])
+        )
 
         node = {
             "id": content_id,
@@ -214,18 +218,51 @@ class BlackboardClient:
             "links": item.get("links", []),
         }
 
-        # Retrieve attachments for document / assignment items
+        # Retrieve direct attachments for document / assignment items
         attachments = await self.get_content_attachments(course_id, content_id)
+        
+        # Also extract embedded file links from body/description HTML
+        body_html = item.get("body") or item.get("description", "")
+        if body_html:
+            try:
+                from bs4 import BeautifulSoup
+                import urllib.parse
+                soup = BeautifulSoup(body_html, "html.parser")
+                idx = 0
+                for a_tag in soup.find_all("a", href=True):
+                    href = a_tag["href"]
+                    link_text = a_tag.get_text(strip=True) or f"File_{idx+1}"
+                    # Check if link points to a webdav file or attachment document
+                    if "/bbcswebdav/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4", ".m4a"]):
+                        idx += 1
+                        filename = link_text
+                        if not any(filename.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4"]):
+                            parsed_path = urllib.parse.urlparse(href).path
+                            url_filename = parsed_path.split("/")[-1]
+                            if url_filename:
+                                filename = url_filename
+                        
+                        full_download_url = href if href.startswith("http") else f"{self.base_url}{href}"
+                        attachments.append({
+                            "id": f"embedded_{content_id}_{idx}",
+                            "fileName": filename,
+                            "downloadUrl": full_download_url,
+                            "originalUrl": href,
+                        })
+            except Exception as e:
+                logger.warning(f"Could not parse HTML embedded links for {content_id}: {e}")
+
         node["attachments"] = attachments
 
-        # Recursively fetch children if folder
-        if is_folder:
-            fmt_id = self._format_course_id(course_id)
-            child_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/children"
-            child_resp = await self._request_with_retry("GET", child_url)
-            if child_resp.status_code == 200:
-                child_data = child_resp.json()
-                child_items = child_data.get("results", [])
+        # Always check if children exist for this item (covers modules, lessons, folders)
+        fmt_id = self._format_course_id(course_id)
+        child_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/children"
+        child_resp = await self._request_with_retry("GET", child_url)
+        if child_resp.status_code == 200:
+            child_data = child_resp.json()
+            child_items = child_data.get("results", [])
+            if child_items:
+                node["isFolder"] = True
                 for child_item in child_items:
                     child_node = await self._build_content_node(course_id, child_item)
                     node["children"].append(child_node)
@@ -241,8 +278,14 @@ class BlackboardClient:
         return []
 
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
-        fmt_id = self._format_course_id(course_id)
-        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments/{attachment_id}/download"
+        if attachment_id.startswith("http"):
+            url = attachment_id
+        elif attachment_id.startswith("/"):
+            url = f"{self.base_url}{attachment_id}"
+        else:
+            fmt_id = self._format_course_id(course_id)
+            url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments/{attachment_id}/download"
+            
         resp = await self._request_with_retry("GET", url)
         if resp.status_code == 200:
             return resp.content
