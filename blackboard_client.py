@@ -194,8 +194,25 @@ class BlackboardClient:
 
         return tree
 
+    async def get_content_detail(self, course_id: str, content_id: str) -> Dict[str, Any]:
+        fmt_id = self._format_course_id(course_id)
+        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}"
+        resp = await self._request_with_retry("GET", url)
+        if resp.status_code == 200:
+            return resp.json()
+        return {}
+
     async def _build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         content_id = item.get("id")
+        
+        # Fetch detailed item endpoint to ensure complete HTML body/instructions are present
+        if content_id:
+            detail = await self.get_content_detail(course_id, content_id)
+            if detail:
+                for k, v in detail.items():
+                    if v and (not item.get(k) or k in ["body", "description", "instructions", "summary", "formattedBody"]):
+                        item[k] = v
+
         title = item.get("title", "Untitled Content")
         handler = item.get("contentHandler", {}).get("id", "")
         is_folder = (
@@ -207,8 +224,8 @@ class BlackboardClient:
         node = {
             "id": content_id,
             "title": title,
-            "body": item.get("body", ""),
-            "description": item.get("description", ""),
+            "body": item.get("body") or item.get("formattedBody", ""),
+            "description": item.get("description") or item.get("instructions") or item.get("summary", ""),
             "contentHandler": handler,
             "isFolder": is_folder,
             "created": item.get("created"),

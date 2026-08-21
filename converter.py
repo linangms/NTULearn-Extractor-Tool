@@ -60,6 +60,38 @@ class CourseMarkdownConverter:
         md = re.sub(r"\n{3,}", "\n\n", md).strip()
         return md
 
+    def _flatten_tree(
+        self,
+        nodes: List[Dict[str, Any]],
+        flat_list: List[Dict[str, Any]],
+        folder_path: str = "",
+    ):
+        for node in nodes:
+            title = node.get("title", "Untitled")
+            current_path = f"{folder_path} / {title}" if folder_path else title
+
+            body = (
+                node.get("body")
+                or node.get("description")
+                or node.get("instructions")
+                or node.get("summary")
+                or node.get("formattedBody")
+                or ""
+            )
+            has_content = bool(body and body.strip()) or bool(node.get("attachments"))
+
+            children = node.get("children", [])
+            if children:
+                if has_content:
+                    node_copy = dict(node)
+                    node_copy["folder_path"] = folder_path
+                    flat_list.append(node_copy)
+                self._flatten_tree(children, flat_list, folder_path=current_path)
+            else:
+                node_copy = dict(node)
+                node_copy["folder_path"] = folder_path
+                flat_list.append(node_copy)
+
     async def build_zip_package(
         self,
         content_tree: List[Dict[str, Any]],
@@ -67,138 +99,73 @@ class CourseMarkdownConverter:
         progress_callback: Optional[Callable[[str, float], Any]] = None,
     ) -> bytes:
         """
-        Processes content tree, creates files/directories in a zip archive in-memory,
-        and returns the raw zip bytes.
+        Processes content tree, creates all converted .md files in ONE single folder inside the zip archive.
         """
         zip_buffer = io.BytesIO()
 
-        total_nodes = self._count_nodes(content_tree)
-        processed_nodes = 0
+        flat_items = []
+        self._flatten_tree(content_tree, flat_items)
+        total_nodes = len(flat_items)
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            # Write a README index file at root
+            out_folder = self.root_folder_name
+
             readme_content = f"# {self.course_name}\n\n"
             readme_content += f"**Course ID:** {self.course_id}\n\n"
-            readme_content += "Extracted automatically via **NTULearn Extractor Tool**.\n\n"
-            readme_content += "## Table of Contents\n\n"
+            readme_content += "Extracted & converted to Markdown via **NTULearn Extractor Tool**.\n\n"
+            readme_content += "## Course Content Index\n\n"
 
-            for node in content_tree:
-                readme_content += f"- [{node['title']}](./{sanitize_filename(node['title'])})\n"
+            for idx, item in enumerate(flat_items, 1):
+                clean_title = sanitize_filename(item.get("title", f"Item_{idx}"))
+                filename = f"{idx:02d}_{clean_title}.md"
+                mod_path = f"*(Module: `{item.get('folder_path')}`)* " if item.get("folder_path") else ""
+                readme_content += f"- [{item.get('title')}]({filename}) {mod_path}\n"
 
-            zf.writestr(f"{self.root_folder_name}/README.md", readme_content)
+            zf.writestr(f"{out_folder}/00_README.md", readme_content)
 
-            # Process tree recursively
-            await self._process_node_list(
-                nodes=content_tree,
-                current_dir=self.root_folder_name,
-                zf=zf,
-                attachment_downloader=attachment_downloader,
-                progress_callback=progress_callback,
-                processed_count=[0],
-                total_nodes=total_nodes,
-            )
+            for idx, item in enumerate(flat_items, 1):
+                clean_title = sanitize_filename(item.get("title", f"Item_{idx}"))
+                filename = f"{idx:02d}_{clean_title}.md"
+                file_path = f"{out_folder}/{filename}"
 
-        zip_buffer.seek(0)
-        return zip_buffer.getvalue()
+                if progress_callback:
+                    pct = (idx / max(1, total_nodes)) * 100
+                    await progress_callback(f"Converting Markdown for: {item.get('title')}", pct)
 
-    def _count_nodes(self, nodes: List[Dict[str, Any]]) -> int:
-        count = 0
-        for node in nodes:
-            count += 1
-            if node.get("children"):
-                count += self._count_nodes(node["children"])
-        return count
-
-    async def _process_node_list(
-        self,
-        nodes: List[Dict[str, Any]],
-        current_dir: str,
-        zf: zipfile.ZipFile,
-        attachment_downloader: Optional[Callable],
-        progress_callback: Optional[Callable],
-        processed_count: List[int],
-        total_nodes: int,
-    ):
-        for node in nodes:
-            processed_count[0] += 1
-            pct = (processed_count[0] / max(1, total_nodes)) * 100
-            if progress_callback:
-                await progress_callback(
-                    f"Processing content item: {node.get('title', 'Untitled')}", pct
-                )
-
-            title = sanitize_filename(node.get("title", "Untitled"))
-            is_folder = node.get("isFolder", False)
-
-            if is_folder:
-                folder_path = f"{current_dir}/{title}"
-                # Process attachments for folder if any
+                attachments_dir = f"{out_folder}/attachments"
                 attachment_map = await self._handle_attachments(
-                    node, folder_path, zf, attachment_downloader
-                )
-
-                # Convert description/body if present
-                body = node.get("body") or node.get("description", "")
-                md_text = self.convert_html_to_markdown(body, attachment_map)
-                
-                folder_md = f"# {node.get('title')}\n\n"
-                if md_text:
-                    folder_md += f"{md_text}\n\n"
-
-                children = node.get("children", [])
-                if children:
-                    folder_md += "### Folder Contents\n\n"
-                    for child in children:
-                        child_title = sanitize_filename(child.get("title", "Untitled"))
-                        if child.get("isFolder"):
-                            folder_md += f"- 📁 [{child.get('title')}](./{child_title}/index.md)\n"
-                        else:
-                            folder_md += f"- 📄 [{child.get('title')}](./{child_title}.md)\n"
-
-                zf.writestr(f"{folder_path}/index.md", folder_md)
-
-                # Process children
-                if children:
-                    await self._process_node_list(
-                        nodes=children,
-                        current_dir=folder_path,
-                        zf=zf,
-                        attachment_downloader=attachment_downloader,
-                        progress_callback=progress_callback,
-                        processed_count=processed_count,
-                        total_nodes=total_nodes,
-                    )
-            else:
-                # Document / File / WebLink
-                attachments_dir = f"{current_dir}/attachments"
-                attachment_map = await self._handle_attachments(
-                    node, attachments_dir, zf, attachment_downloader
+                    item, attachments_dir, zf, attachment_downloader
                 )
 
                 body = (
-                    node.get("body")
-                    or node.get("description")
-                    or node.get("instructions")
-                    or node.get("summary")
-                    or node.get("formattedBody")
+                    item.get("body")
+                    or item.get("description")
+                    or item.get("instructions")
+                    or item.get("summary")
+                    or item.get("formattedBody")
                     or ""
                 )
+
                 md_text = self.convert_html_to_markdown(body, attachment_map)
 
-                full_md = f"# {node.get('title')}\n\n"
-                if md_text and md_text.strip():
-                    full_md += f"{md_text}\n\n"
+                full_md = f"# {item.get('title')}\n\n"
+                if item.get("folder_path"):
+                    full_md += f"**Module / Path:** `{item.get('folder_path')}`\n\n"
 
-                # Add link list for attached files at the bottom
-                if node.get("attachments"):
+                if md_text and md_text.strip():
+                    full_md += f"{md_text.strip()}\n\n"
+
+                if item.get("attachments"):
                     full_md += "### Attached Files & Resources\n\n"
-                    for att in node["attachments"]:
+                    for att in item["attachments"]:
                         att_name = sanitize_filename(att.get("fileName", "attachment"))
                         rel_link = f"./attachments/{att_name}"
                         full_md += f"- 📎 [{att.get('fileName', 'attachment')}]({rel_link})\n"
 
-                file_path = f"{current_dir}/{title}.md"
                 zf.writestr(file_path, full_md)
+
+        zip_buffer.seek(0)
+        return zip_buffer.getvalue()
 
     async def _handle_attachments(
         self,
