@@ -20,6 +20,73 @@ def sanitize_filename(name: str) -> str:
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
     return sanitized or "Untitled"
 
+
+def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> str:
+    """
+    Extracts readable text content from PDF, PPTX, DOCX, TXT, or HTML attachment files.
+    """
+    if not file_bytes:
+        return ""
+
+    lower_name = filename.lower()
+
+    # 1. PDF extraction
+    if lower_name.endswith(".pdf"):
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+            pages_text = []
+            for idx, page in enumerate(reader.pages, 1):
+                t = page.extract_text() or ""
+                if t.strip():
+                    pages_text.append(f"#### Page {idx}\n\n{t.strip()}")
+            if pages_text:
+                return "\n\n".join(pages_text)
+        except Exception as e:
+            logger.warning(f"Could not extract text from PDF {filename}: {e}")
+
+    # 2. PowerPoint (.pptx) extraction
+    elif lower_name.endswith(".pptx"):
+        try:
+            import pptx
+            prs = pptx.Presentation(io.BytesIO(file_bytes))
+            slides_text = []
+            for idx, slide in enumerate(prs.slides, 1):
+                slide_content = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text and shape.text.strip():
+                        slide_content.append(shape.text.strip())
+                if slide_content:
+                    slides_text.append(f"#### Slide {idx}\n\n" + "\n\n".join(slide_content))
+            if slides_text:
+                return "\n\n".join(slides_text)
+        except Exception as e:
+            logger.warning(f"Could not extract text from PPTX {filename}: {e}")
+
+    # 3. Word (.docx) extraction
+    elif lower_name.endswith(".docx"):
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(file_bytes))
+            paras = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+            if paras:
+                return "\n\n".join(paras)
+        except Exception as e:
+            logger.warning(f"Could not extract text from DOCX {filename}: {e}")
+
+    # 4. Plain Text / HTML / Markdown
+    elif any(lower_name.endswith(ext) for ext in [".txt", ".html", ".htm", ".md", ".csv", ".json"]):
+        try:
+            raw_text = file_bytes.decode("utf-8", errors="ignore")
+            if lower_name.endswith(".html") or lower_name.endswith(".htm"):
+                return markdownify.markdownify(raw_text)
+            return raw_text
+        except Exception as e:
+            logger.warning(f"Could not decode text file {filename}: {e}")
+
+    return ""
+
+
 class CourseMarkdownConverter:
     """
     Parses Blackboard content trees, converts HTML into Markdown,
@@ -29,34 +96,30 @@ class CourseMarkdownConverter:
 
     def __init__(self, course_name: str, course_id: str):
         self.course_name = course_name
+        self.course_name = course_name or "Course Materials"
         self.course_id = course_id
-        self.root_folder_name = sanitize_filename(f"{course_name} ({course_id})")
+        self.root_folder_name = sanitize_filename(f"{course_id}_Markdown")
 
-    def convert_html_to_markdown(self, html_content: str, attachment_mapping: Dict[str, str]) -> str:
-        """
-        Converts HTML string to Markdown, replacing Blackboard attachment links with relative paths.
-        """
+    def convert_html_to_markdown(self, html_content: str, attachment_map: Optional[Dict[str, str]] = None) -> str:
         if not html_content or not html_content.strip():
             return ""
 
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # Replace attachment links or embedded file URLs
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            for original_url, local_rel_path in attachment_mapping.items():
-                if original_url in href or href in original_url:
-                    a_tag["href"] = local_rel_path
+        if attachment_map:
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                for orig_url, rel_path in attachment_map.items():
+                    if orig_url in href or href in orig_url:
+                        a_tag["href"] = rel_path
 
-        for img_tag in soup.find_all("img", src=True):
-            src = img_tag["src"]
-            for original_url, local_rel_path in attachment_mapping.items():
-                if original_url in src or src in original_url:
-                    img_tag["src"] = local_rel_path
+            for img_tag in soup.find_all("img", src=True):
+                src = img_tag["src"]
+                for orig_url, rel_path in attachment_map.items():
+                    if orig_url in src or src in orig_url:
+                        img_tag["src"] = rel_path
 
-        cleaned_html = str(soup)
-        md = markdownify.markdownify(cleaned_html, heading_style="ATX")
-        # Clean up excess whitespace lines
+        md = markdownify.markdownify(str(soup), heading_style="ATX")
         md = re.sub(r"\n{3,}", "\n\n", md).strip()
         return md
 
@@ -133,7 +196,7 @@ class CourseMarkdownConverter:
                     await progress_callback(f"Converting Markdown for: {item.get('title')}", pct)
 
                 attachments_dir = f"{out_folder}/attachments"
-                attachment_map = await self._handle_attachments(
+                attachment_map, doc_text_map = await self._handle_attachments(
                     item, attachments_dir, zf, attachment_downloader
                 )
 
@@ -155,6 +218,12 @@ class CourseMarkdownConverter:
                 if md_text and md_text.strip():
                     full_md += f"{md_text.strip()}\n\n"
 
+                # Append text extracted directly from attached PDF / PPTX / DOCX / TXT files!
+                if doc_text_map:
+                    for att_file, doc_text in doc_text_map.items():
+                        full_md += f"## Extracted Content from Document (`{att_file}`)\n\n"
+                        full_md += f"{doc_text}\n\n"
+
                 if item.get("attachments"):
                     full_md += "### Attached Files & Resources\n\n"
                     for att in item["attachments"]:
@@ -173,8 +242,9 @@ class CourseMarkdownConverter:
         attachments_dir: str,
         zf: zipfile.ZipFile,
         downloader: Optional[Callable],
-    ) -> Dict[str, str]:
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
         mapping = {}
+        doc_text_map = {}
         attachments = node.get("attachments", [])
         content_id = node.get("id")
 
