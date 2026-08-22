@@ -180,14 +180,141 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
-    # Clean course_id: unquote and strip internal PK formatting (_626_1 -> 626)
-    if course_id:
-        course_id = urllib.parse.unquote(urllib.parse.unquote(str(course_id))).strip()
-        pk_match = re.search(r'^_?(\d+)_?\d*$', course_id)
+def clean_course_id_string(val: str) -> str:
+    if not val:
+        return ""
+    import urllib.parse, re
+    # 1. Double unquote string
+    unquoted = urllib.parse.unquote(urllib.parse.unquote(str(val))).strip()
+    # 2. Split on comma, semicolon, or %2C if present (e.g. _626_1%2C86cb8c88c33b4f6ab61fa92693e8a376)
+    first_part = re.split(r'[,;]|\b%2C\b', unquoted, flags=re.IGNORECASE)[0].strip()
+    # 3. If Blackboard internal PK like _626_1 or _12345_1, convert to numeric ID (626, 12345)
+    if first_part.startswith("_"):
+        pk_match = re.search(r'_?(\d+)_?\d*', first_part)
         if pk_match:
-            course_id = pk_match.group(1)
-    else:
-        course_id = ""
+            return pk_match.group(1)
+    return first_part
+
+
+async def extract_lti_context(request: Request) -> Dict[str, str]:
+    """
+    Extracts LTI claims, course ID, course name, and user role from request payload and referer headers.
+    """
+    import urllib.parse, re
+
+    params = {}
+    raw_url = str(request.url)
+    unquoted_url = urllib.parse.unquote(urllib.parse.unquote(raw_url))
+
+    # Parse query parameters with double URL unquoting
+    for k, v in request.query_params.items():
+        params[k] = v
+        k_un = urllib.parse.unquote(urllib.parse.unquote(k))
+        v_un = urllib.parse.unquote(urllib.parse.unquote(v))
+        params[k_un] = v_un
+
+    form_data = {}
+    if request.method == "POST":
+        try:
+            form = await request.form()
+            form_data = dict(form)
+            params.update(form_data)
+        except Exception as e:
+            logger.debug(f"Could not parse form: {e}")
+
+    # Fallback regex extraction from raw unquoted URL string (handles course_id%253D_626_1 or course_id=_626_1)
+    m_course = (
+        re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+    )
+    if m_course and "course_id" not in params:
+        params["course_id"] = m_course.group(1)
+
+    id_token = params.get("id_token") or form_data.get("id_token")
+    
+    # 1. Case-insensitive dictionary inspection of all query and form parameters
+    params_lower = {str(k).lower(): str(v) for k, v in params.items() if v}
+    
+    course_id = (
+        params_lower.get("course_id") 
+        or params_lower.get("courseid")
+        or params_lower.get("course")
+        or params_lower.get("custom_course_id")
+        or params_lower.get("custom_course_code")
+        or params_lower.get("custom_courseid")
+        or params_lower.get("custom_course")
+        or params_lower.get("custom_context_label")
+        or params_lower.get("context_label") 
+        or params_lower.get("ext_course_id")
+        or params_lower.get("ext_lms_course_id")
+        or params_lower.get("lis_course_offering_sourcedid")
+        or params_lower.get("lis_course_section_sourcedid")
+        or params_lower.get("context_id") 
+    )
+    course_name = params.get("course_name") or params.get("context_title") or params.get("title")
+    user_role = "Instructor"
+
+    # 2. Decode LTI 1.3 JWT ID Token if present
+    if id_token:
+        try:
+            import jwt
+            decoded = jwt.decode(id_token, options={"verify_signature": False})
+            logger.info(f"Decoded LTI ID Token claims: {decoded}")
+
+            context_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
+            custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
+            lis_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/lis", {})
+            roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
+
+            c_id = (
+                custom_claim.get("course_id") 
+                or custom_claim.get("course_code")
+                or custom_claim.get("courseid")
+                or custom_claim.get("context_label")
+                or custom_claim.get("CourseSection.id")
+                or lis_claim.get("course_offering_sourcedid")
+                or lis_claim.get("course_section_sourcedid")
+                or context_claim.get("label") 
+                or context_claim.get("id") 
+            )
+            c_name = (
+                context_claim.get("title") 
+                or context_claim.get("label") 
+                or custom_claim.get("course_name") 
+                or custom_claim.get("context_title")
+            )
+
+            if c_id:
+                course_id = str(c_id)
+            if c_name:
+                course_name = str(c_name)
+
+            if roles_claim:
+                if any("Instructor" in r or "Administrator" in r or "ContentDeveloper" in r for r in roles_claim):
+                    user_role = "Instructor"
+                else:
+                    user_role = "Student"
+        except Exception as e:
+            logger.warning(f"Error decoding id_token: {e}")
+
+    # 3. Inspect HTTP Referer header or Request URL if course_id is missing or default
+    referer = request.headers.get("referer", "") or str(request.url)
+    unquoted_referer = urllib.parse.unquote(urllib.parse.unquote(referer))
+    if not course_id:
+        match = (
+            re.search(r'/courses/([^/?]+)', unquoted_referer)
+            or re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'courseId[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+        )
+        if match:
+            extracted = match.group(1)
+            logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
+            course_id = extracted
+
+    # Clean course_id string (handles _626_1%2C86cb... -> 626)
+    course_id = clean_course_id_string(course_id)
 
     if course_id:
         if not course_name or course_name == f"{course_id} - Course Materials":
@@ -252,7 +379,7 @@ async def lti_login(request: Request):
         except Exception as e:
             logger.warning(f"Error parsing login form data: {e}")
 
-    # Fallback regex extraction from raw unquoted URL (handles course_id%253D_626_1)
+    # Fallback regex extraction from raw unquoted URL (handles course_id%253D_626_1%2C...)
     m_course = (
         re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
         or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
@@ -270,11 +397,7 @@ async def lti_login(request: Request):
 
     # Clean course_id if present in params
     if "course_id" in params:
-        c_val = urllib.parse.unquote(urllib.parse.unquote(str(params["course_id"]))).strip()
-        pk_m = re.search(r'^_?(\d+)_?\d*$', c_val)
-        if pk_m:
-            c_val = pk_m.group(1)
-        params["course_id"] = c_val
+        params["course_id"] = clean_course_id_string(params["course_id"])
 
     logger.info(f"LTI Login initiated with params={params}")
 

@@ -365,13 +365,16 @@
             }
 
             if (courseParam) {
-                courseParam = decodeURIComponent(decodeURIComponent(courseParam)).trim();
-                const pkMatch = courseParam.match(/^_?(\d+)_?\d*$/);
-                if (pkMatch) {
-                    courseParam = pkMatch[1];
+                let clean = decodeURIComponent(decodeURIComponent(courseParam)).trim();
+                clean = clean.split(/[,;]|\b%2C\b/i)[0].trim();
+                if (clean.startsWith("_")) {
+                    const pkMatch = clean.match(/_?(\d+)_?\d*/);
+                    if (pkMatch) {
+                        clean = pkMatch[1];
+                    }
                 }
-                if (courseIdEl) courseIdEl.innerText = courseParam;
-                if (titleEl) titleEl.innerText = `${courseParam} - Course Materials`;
+                if (courseIdEl) courseIdEl.innerText = clean;
+                if (titleEl) titleEl.innerText = `${clean} - Course Materials`;
             }
         });
     </script>
