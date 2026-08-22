@@ -348,18 +348,30 @@
 
             const params = new URLSearchParams(window.location.search);
             let courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
-            if (!courseParam && document.referrer) {
-                const refMatch = document.referrer.match(/\/courses\/([^/?#]+)/i)
-                              || document.referrer.match(/course_id=([^&#]+)/i)
-                              || document.referrer.match(/courseId=([^&#]+)/i);
-                if (refMatch) {
-                    courseParam = decodeURIComponent(refMatch[1]);
-                }
+            
+            const fullUrl = decodeURIComponent(decodeURIComponent(window.location.href));
+            const fullRef = document.referrer ? decodeURIComponent(decodeURIComponent(document.referrer)) : "";
+
+            if (!courseParam) {
+                const urlMatch = fullUrl.match(/course_id[=:=%253D%3D]+([^&?\s]+)/i)
+                              || fullUrl.match(/custom_course_id[=:=%253D%3D]+([^&?\s]+)/i);
+                if (urlMatch) courseParam = urlMatch[1];
+            }
+            if (!courseParam && fullRef) {
+                const refMatch = fullRef.match(/\/courses\/([^/?#]+)/i)
+                              || fullRef.match(/course_id[=:=%253D%3D]+([^&?\s]+)/i)
+                              || fullRef.match(/custom_course_id[=:=%253D%3D]+([^&?\s]+)/i);
+                if (refMatch) courseParam = refMatch[1];
             }
 
             if (courseParam) {
-                if (courseIdEl) courseIdEl.innerText = courseParam.trim();
-                if (titleEl) titleEl.innerText = `${courseParam.trim()} - Course Materials`;
+                courseParam = decodeURIComponent(decodeURIComponent(courseParam)).trim();
+                const pkMatch = courseParam.match(/^_?(\d+)_?\d*$/);
+                if (pkMatch) {
+                    courseParam = pkMatch[1];
+                }
+                if (courseIdEl) courseIdEl.innerText = courseParam;
+                if (titleEl) titleEl.innerText = `${courseParam} - Course Materials`;
             }
         });
     </script>

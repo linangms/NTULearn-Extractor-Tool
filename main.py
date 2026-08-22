@@ -67,7 +67,19 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     """
     Extracts LTI claims, course ID, course name, and user role from request payload and referer headers.
     """
-    params = dict(request.query_params)
+    import urllib.parse, re
+
+    params = {}
+    raw_url = str(request.url)
+    unquoted_url = urllib.parse.unquote(urllib.parse.unquote(raw_url))
+
+    # Parse query parameters with double URL unquoting
+    for k, v in request.query_params.items():
+        params[k] = v
+        k_un = urllib.parse.unquote(urllib.parse.unquote(k))
+        v_un = urllib.parse.unquote(urllib.parse.unquote(v))
+        params[k_un] = v_un
+
     form_data = {}
     if request.method == "POST":
         try:
@@ -76,6 +88,15 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             params.update(form_data)
         except Exception as e:
             logger.debug(f"Could not parse form: {e}")
+
+    # Fallback regex extraction from raw unquoted URL string (handles course_id%253D_626_1 or course_id=_626_1)
+    m_course = (
+        re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+    )
+    if m_course and "course_id" not in params:
+        params["course_id"] = m_course.group(1)
 
     id_token = params.get("id_token") or form_data.get("id_token")
     
@@ -146,21 +167,25 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
     # 3. Inspect HTTP Referer header or Request URL if course_id is missing or default
     referer = request.headers.get("referer", "") or str(request.url)
-    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1", "CCE102-TST"] or course_id.startswith("_"):
-        import re
+    unquoted_referer = urllib.parse.unquote(urllib.parse.unquote(referer))
+    if not course_id:
         match = (
-            re.search(r'/courses/([^/?]+)', referer)
-            or re.search(r'course_id=([^&]+)', referer, re.IGNORECASE)
-            or re.search(r'courseId=([^&]+)', referer, re.IGNORECASE)
-            or re.search(r'course=([^&]+)', referer, re.IGNORECASE)
+            re.search(r'/courses/([^/?]+)', unquoted_referer)
+            or re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'courseId[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
         )
         if match:
             extracted = match.group(1)
             logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
+    # Clean course_id: unquote and strip internal PK formatting (_626_1 -> 626)
     if course_id:
-        course_id = str(course_id).strip()
+        course_id = urllib.parse.unquote(urllib.parse.unquote(str(course_id))).strip()
+        pk_match = re.search(r'^_?(\d+)_?\d*$', course_id)
+        if pk_match:
+            course_id = pk_match.group(1)
     else:
         course_id = ""
 
@@ -207,13 +232,34 @@ async def lti_login(request: Request):
     """
     LTI 1.3 OIDC login initiation route.
     """
-    params = dict(request.query_params)
+    import urllib.parse, re
+
+    params = {}
+    raw_url = str(request.url)
+    unquoted_url = urllib.parse.unquote(urllib.parse.unquote(raw_url))
+
+    for k, v in request.query_params.items():
+        params[k] = v
+        k_un = urllib.parse.unquote(urllib.parse.unquote(k))
+        v_un = urllib.parse.unquote(urllib.parse.unquote(v))
+        params[k_un] = v_un
+
     if request.method == "POST":
         try:
             form_data = await request.form()
-            params.update(dict(form_data))
+            for k, v in form_data.items():
+                params[str(k)] = str(v)
         except Exception as e:
             logger.warning(f"Error parsing login form data: {e}")
+
+    # Fallback regex extraction from raw unquoted URL (handles course_id%253D_626_1)
+    m_course = (
+        re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+    )
+    if m_course and "course_id" not in params:
+        params["course_id"] = m_course.group(1)
 
     iss = params.get("iss")
     target_link_uri = params.get("target_link_uri") or str(request.url_for("lti_launch"))
@@ -222,15 +268,23 @@ async def lti_login(request: Request):
     client_id = params.get("client_id")
     login_hint = params.get("login_hint")
 
-    logger.info(f"LTI Login initiated from iss={iss}, target={target_link_uri}, client_id={client_id}, params={params}")
+    # Clean course_id if present in params
+    if "course_id" in params:
+        c_val = urllib.parse.unquote(urllib.parse.unquote(str(params["course_id"]))).strip()
+        pk_m = re.search(r'^_?(\d+)_?\d*$', c_val)
+        if pk_m:
+            c_val = pk_m.group(1)
+        params["course_id"] = c_val
+
+    logger.info(f"LTI Login initiated with params={params}")
+
+    hidden_inputs = ""
+    for k, v in params.items():
+        if k not in ["iss", "client_id"]:
+            val = str(v) if v is not None else ""
+            hidden_inputs += f'<input type="hidden" name="{k}" value="{val}" />\n'
 
     if iss and login_hint:
-        hidden_inputs = ""
-        for k, v in params.items():
-            if k not in ["iss", "client_id"]:
-                val = str(v) if v is not None else ""
-                hidden_inputs += f'<input type="hidden" name="{k}" value="{val}" />\n'
-
         response_html = f"""
         <html>
         <body>
@@ -245,6 +299,11 @@ async def lti_login(request: Request):
         </html>
         """
         return HTMLResponse(content=response_html)
+
+    # If simple redirect without OIDC state, forward course_id in target_link_uri
+    if "course_id" in params and params["course_id"] and "course_id" not in target_link_uri:
+        delim = "&" if "?" in target_link_uri else "?"
+        target_link_uri += f"{delim}course_id={urllib.parse.quote(params['course_id'])}"
 
     return HTMLResponse(content=f"<html><body><p>Redirecting...</p><script>window.location.href='{target_link_uri}';</script></body></html>")
 
