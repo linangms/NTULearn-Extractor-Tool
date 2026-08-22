@@ -54,7 +54,7 @@
                         <span>Target Course</span>
                     </div>
                     <h2 class="text-2xl font-bold text-slate-800 tracking-tight flex items-center space-x-2">
-                        <span id="course-title">{% set clean_t = course_name.replace("Course ", "") if course_name else "Course Materials" %}{{ clean_t if "Course Materials" in clean_t else clean_t + " Course Materials" }}</span>
+                        <span id="course-title">{% if course_name and not course_name.isdigit() and course_name != course_id %}{% set clean_t = course_name.replace("Course ", "") %}{{ clean_t if "Course Materials" in clean_t else clean_t + " Course Materials" }}{% else %}Course Materials{% endif %}</span>
                     </h2>
                     <p class="text-sm text-slate-500 mt-1 flex items-center space-x-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
