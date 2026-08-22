@@ -64,13 +64,6 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 # Default Blackboard REST API configuration (can be overriden by env vars)
 BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
-KNOWN_COURSE_MAP = {
-    "560": "TMSC001",
-    "623": "CCE102-Tst",
-    "626": "MKTG101",
-    "646": "MKTG101",
-}
-
 
 async def extract_lti_context(request: Request) -> Dict[str, str]:
     """
@@ -354,11 +347,7 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
     if course_id:
         if not course_name or course_name == "Course Materials Extractor" or course_name == course_id or course_name.isdigit() or course_name.startswith("Course "):
-            c_clean = clean_course_id_string(course_id)
-            if c_clean in KNOWN_COURSE_MAP:
-                course_name = KNOWN_COURSE_MAP[c_clean]
-            else:
-                course_name = course_id
+            course_name = course_id
     else:
         course_name = "Course Materials Extractor"
 
@@ -383,23 +372,20 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     user_role = session_data.get("user_role") or context["user_role"]
 
     if course_id and (not course_name or course_name.startswith("Course ") or course_name == "Course Materials Extractor" or course_name == course_id or course_name.isdigit()):
-        c_clean = clean_course_id_string(course_id)
-        if c_clean in KNOWN_COURSE_MAP:
-            course_name = KNOWN_COURSE_MAP[c_clean]
         import os
         bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
         bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
         bb_base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
-        if bb_client_id and bb_client_secret:
-            try:
-                async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
+        try:
+            async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
+                if bb_client_id and bb_client_secret:
                     await bb_client.authenticate()
-                    details = await bb_client.get_course_details(course_id)
-                    resolved_name = details.get("courseId") or details.get("name")
-                    if resolved_name and not resolved_name.startswith("Course "):
-                        course_name = resolved_name
-            except Exception as e:
-                logger.warning(f"Could not resolve course name for dashboard: {e}")
+                details = await bb_client.get_course_details(course_id)
+                resolved_name = details.get("courseId") or details.get("name")
+                if resolved_name and not resolved_name.startswith("Course ") and resolved_name != course_id:
+                    course_name = resolved_name
+        except Exception as e:
+            logger.warning(f"Could not resolve course name for dashboard: {e}")
 
     return templates.TemplateResponse(
         request=request,
@@ -590,9 +576,8 @@ async def extract_course_stream(
             yield f"data: {json.dumps({'stage': 1, 'progress': 10, 'message': f'Connecting to Blackboard REST API for course {course_id}...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            c_clean = clean_course_id_string(course_id)
             if not course_title or course_title == course_id or course_title.isdigit() or course_title.startswith("Course "):
-                display_title = KNOWN_COURSE_MAP.get(c_clean, course_title or course_id)
+                display_title = course_title or course_id
             else:
                 display_title = course_title
 

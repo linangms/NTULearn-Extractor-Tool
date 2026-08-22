@@ -153,20 +153,6 @@ class BlackboardClient:
                     data = resp.json()
                     if "results" in data and isinstance(data["results"], list) and len(data["results"]) > 0:
                         return data["results"][0]
-                    return data
-        known = {
-            "560": "TMSC001",
-            "_560_1": "TMSC001",
-            "623": "CCE102-Tst",
-            "_623_1": "CCE102-Tst",
-            "626": "MKTG101",
-            "_626_1": "MKTG101",
-            "646": "MKTG101",
-            "_646_1": "MKTG101",
-        }
-        cid = str(course_id).strip()
-        if cid in known:
-            return {"id": course_id, "name": known[cid], "courseId": known[cid]}
         return {"id": course_id, "name": f"Course {course_id}", "courseId": course_id}
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
