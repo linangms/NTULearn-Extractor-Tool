@@ -110,18 +110,20 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         or params_lower.get("courseid")
         or params_lower.get("course")
         or params_lower.get("custom_course_id")
-        or params_lower.get("custom_course_code")
-        or params_lower.get("custom_courseid")
-        or params_lower.get("custom_course")
-        or params_lower.get("custom_context_label")
-        or params_lower.get("context_label") 
         or params_lower.get("ext_course_id")
         or params_lower.get("ext_lms_course_id")
-        or params_lower.get("lis_course_offering_sourcedid")
-        or params_lower.get("lis_course_section_sourcedid")
         or params_lower.get("context_id") 
     )
-    course_name = params.get("course_name") or params.get("context_title") or params.get("title")
+    course_name = (
+        params_lower.get("course_name")
+        or params_lower.get("context_title")
+        or params_lower.get("custom_course_name")
+        or params_lower.get("custom_course_code")
+        or params_lower.get("custom_context_title")
+        or params_lower.get("custom_context_label")
+        or params_lower.get("context_label")
+        or params_lower.get("title")
+    )
     user_role = "Instructor"
 
     # 2. Decode LTI 1.3 JWT ID Token if present
@@ -344,6 +346,22 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     course_id = session_data.get("course_id") or context["course_id"]
     user_role = session_data.get("user_role") or context["user_role"]
 
+    if course_id and (not course_name or course_name.startswith("Course ") or course_name == "Course Materials Extractor"):
+        import os
+        bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
+        bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
+        bb_base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
+        if bb_client_id and bb_client_secret:
+            try:
+                async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
+                    await bb_client.authenticate()
+                    details = await bb_client.get_course_details(course_id)
+                    resolved_name = details.get("courseId") or details.get("name")
+                    if resolved_name:
+                        course_name = resolved_name
+            except Exception as e:
+                logger.warning(f"Could not resolve course name for dashboard: {e}")
+
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -552,8 +570,8 @@ async def extract_course_stream(
                     async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
                         await bb_client.authenticate()
                         details = await bb_client.get_course_details(course_id)
-                        if details and details.get("name"):
-                            display_title = details["name"]
+                        if details:
+                            display_title = details.get("courseId") or details.get("name") or display_title
                         tree = await bb_client.get_contents_tree(course_id)
                         yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
                 except Exception as api_err:
