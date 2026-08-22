@@ -381,7 +381,60 @@ class BlackboardClient:
             return resp.json().get("results", [])
         return []
 
+    async def _try_download_kaltura_video(self, entry_id: str, orig_url: str) -> Optional[bytes]:
+        """
+        Attempts to fetch direct MP4 video bytes for a Kaltura entry_id across candidate partner IDs.
+        """
+        import re
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://ntulearn.ntu.edu.sg/",
+        }
+        
+        partner_candidates = []
+        p_match = re.search(r'/p/(\d+)', orig_url)
+        if p_match:
+            partner_candidates.append(p_match.group(1))
+        
+        for p in ["2342341", "2092301", "102", "103", "0"]:
+            if p not in partner_candidates:
+                partner_candidates.append(p)
+                
+        for pid in partner_candidates:
+            urls = [
+                f"https://cdnapisec.kaltura.com/p/{pid}/sp/{pid}00/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4",
+                f"https://cdn.kaltura.com/p/{pid}/sp/{pid}00/playManifest/entryId/{entry_id}/format/url/protocol/https/flavorParamId/0/video.mp4",
+                f"https://cfvod.kaltura.com/pd/p/{pid}/sp/{pid}00/serveFlavor/entryId/{entry_id}/v/11/flavorId/0/name/video.mp4",
+            ]
+            for candidate_url in urls:
+                try:
+                    resp = await self._request_with_retry("GET", candidate_url, headers=headers, follow_redirects=True)
+                    if resp.status_code == 200 and len(resp.content) > 10000 and not resp.content.startswith(b"<?xml") and not resp.content.startswith(b"<html"):
+                        logger.info(f"Successfully downloaded Kaltura video for {entry_id} ({len(resp.content)} bytes) via {candidate_url}")
+                        return resp.content
+                except Exception as e:
+                    logger.debug(f"Kaltura candidate URL failed ({candidate_url}): {e}")
+
+        if orig_url and orig_url.startswith("http"):
+            try:
+                resp = await self._request_with_retry("GET", orig_url, headers=headers, follow_redirects=True)
+                if resp.status_code == 200 and len(resp.content) > 10000 and not resp.content.startswith(b"<?xml") and not resp.content.startswith(b"<html"):
+                    return resp.content
+            except Exception as e:
+                logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
+
+        return None
+
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
+        import re
+        if "kaltura" in attachment_id.lower() or re.search(r'\b([01]_[a-zA-Z0-9]{8,12})\b', attachment_id):
+            e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', attachment_id, re.I)
+            entry_id = e_match.group(1) if e_match else ""
+            if entry_id:
+                k_bytes = await self._try_download_kaltura_video(entry_id, attachment_id)
+                if k_bytes:
+                    return k_bytes
+
         if attachment_id.startswith("http"):
             url = attachment_id
         elif attachment_id.startswith("/"):
