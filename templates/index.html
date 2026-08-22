@@ -54,12 +54,12 @@
                         <span>Target Course</span>
                     </div>
                     <h2 class="text-2xl font-extrabold text-slate-900" id="course-title">
-                        {{ course_name if course_name else "CCE102-TST - Course Materials" }}
+                        {{ course_name if (course_name and 'CCE102' not in course_name) else "MKTG101 - Course Materials" }}
                     </h2>
                     <p class="text-sm text-slate-500 mt-2 flex flex-wrap items-center gap-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
-                            <input id="course-id-input" type="text" value="{{ course_id if course_id else 'CCE102-TST' }}" class="ml-1.5 px-2 py-0.5 text-sm font-bold text-slate-800 bg-slate-100 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-36" title="Click to edit Course ID if needed" />
-                            <span id="course-id" class="hidden">{{ course_id if course_id else 'CCE102-TST' }}</span>
+                            <input id="course-id-input" type="text" value="{{ course_id if (course_id and course_id != 'CCE102-TST') else 'MKTG101' }}" class="ml-1.5 px-2.5 py-1 text-sm font-bold text-slate-900 bg-amber-50 border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-40 shadow-sm" title="Type or edit Course ID here" placeholder="e.g. MKTG101" />
+                            <span id="course-id" class="hidden">{{ course_id if (course_id and course_id != 'CCE102-TST') else 'MKTG101' }}</span>
                         </span>
                         <span><i class="fa-solid fa-user-tie text-slate-400 mr-1"></i> User Role: <strong class="text-slate-700">{{ user_role if user_role else "Instructor" }}</strong></span>
                     </p>
@@ -345,15 +345,25 @@
         }
 
         document.addEventListener("DOMContentLoaded", function() {
+            const courseInput = document.getElementById("course-id-input");
+            const titleEl = document.getElementById("course-title");
+
             const params = new URLSearchParams(window.location.search);
             const courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
-            if (courseParam) {
-                const input = document.getElementById("course-id-input");
-                if (input) input.value = courseParam.trim();
-                const titleEl = document.getElementById("course-title");
+            if (courseParam && courseInput) {
+                courseInput.value = courseParam.trim();
                 if (titleEl) {
                     titleEl.innerText = `${courseParam.trim()} - Course Materials`;
                 }
+            }
+
+            if (courseInput) {
+                courseInput.addEventListener("input", function() {
+                    const val = courseInput.value.trim() || "MKTG101";
+                    if (titleEl) {
+                        titleEl.innerText = `${val} - Course Materials`;
+                    }
+                });
             }
         });
     </script>
