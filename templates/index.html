@@ -54,12 +54,12 @@
                         <span>Target Course</span>
                     </div>
                     <h2 class="text-2xl font-extrabold text-slate-900" id="course-title">
-                        {{ course_name if (course_name and 'CCE102' not in course_name) else "MKTG101 - Course Materials" }}
+                        {{ course_name if course_name else "Course Materials Extractor" }}
                     </h2>
                     <p class="text-sm text-slate-500 mt-2 flex flex-wrap items-center gap-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
-                            <input id="course-id-input" type="text" value="{{ course_id if (course_id and course_id != 'CCE102-TST') else 'MKTG101' }}" class="ml-1.5 px-2.5 py-1 text-sm font-bold text-slate-900 bg-amber-50 border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-40 shadow-sm" title="Type or edit Course ID here" placeholder="e.g. MKTG101" />
-                            <span id="course-id" class="hidden">{{ course_id if (course_id and course_id != 'CCE102-TST') else 'MKTG101' }}</span>
+                            <input id="course-id-input" type="text" value="{{ course_id }}" class="ml-1.5 px-2.5 py-1 text-sm font-bold text-slate-900 bg-amber-50 border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-40 shadow-sm" title="Course ID passed from Blackboard launch (or edit here)" placeholder="Enter Course ID e.g. MKTG101" />
+                            <span id="course-id" class="hidden">{{ course_id }}</span>
                         </span>
                         <span><i class="fa-solid fa-user-tie text-slate-400 mr-1"></i> User Role: <strong class="text-slate-700">{{ user_role if user_role else "Instructor" }}</strong></span>
                     </p>
@@ -359,9 +359,9 @@
 
             if (courseInput) {
                 courseInput.addEventListener("input", function() {
-                    const val = courseInput.value.trim() || "MKTG101";
+                    const val = courseInput.value.trim();
                     if (titleEl) {
-                        titleEl.innerText = `${val} - Course Materials`;
+                        titleEl.innerText = val ? `${val} - Course Materials` : "Course Materials Extractor";
                     }
                 });
             }

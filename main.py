@@ -166,11 +166,14 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         if code_match and not course_id.startswith("_"):
             course_id = code_match.group(1).upper()
 
-    if not course_id or course_id in ["CCE102-TST", "TMSC001", "NTU_CZ4042_2026_S1"]:
-        course_id = "MKTG101"
+    if not course_id:
+        course_id = ""
 
-    if not course_name or "CZ4042" in course_name or "TMSC001" in course_name or "CCE102" in course_name or course_name == f"{course_id} - Course Materials":
-        course_name = f"{course_id} - Course Materials"
+    if course_id:
+        if not course_name or course_name == f"{course_id} - Course Materials":
+            course_name = f"{course_id} - Course Materials"
+    else:
+        course_name = "Course Materials Extractor"
 
     logger.info(f"Resolved LTI context: course_id='{course_id}', course_name='{course_name}', role='{user_role}'")
     return {
