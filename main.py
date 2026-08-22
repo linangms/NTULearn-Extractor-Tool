@@ -79,20 +79,29 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
     id_token = params.get("id_token") or form_data.get("id_token")
     
+    # 1. Case-insensitive dictionary inspection of all query and form parameters
+    params_lower = {str(k).lower(): str(v) for k, v in params.items() if v}
+    
     course_id = (
-        params.get("course_id") 
-        or params.get("courseId")
-        or params.get("course")
-        or params.get("context_label") 
-        or params.get("context_id") 
-        or params.get("custom_course_id")
-        or params.get("custom_course_code")
-        or params.get("custom_context_label")
-        or params.get("lis_course_offering_sourcedid")
+        params_lower.get("course_id") 
+        or params_lower.get("courseid")
+        or params_lower.get("course")
+        or params_lower.get("custom_course_id")
+        or params_lower.get("custom_course_code")
+        or params_lower.get("custom_courseid")
+        or params_lower.get("custom_course")
+        or params_lower.get("custom_context_label")
+        or params_lower.get("context_label") 
+        or params_lower.get("ext_course_id")
+        or params_lower.get("ext_lms_course_id")
+        or params_lower.get("lis_course_offering_sourcedid")
+        or params_lower.get("lis_course_section_sourcedid")
+        or params_lower.get("context_id") 
     )
     course_name = params.get("course_name") or params.get("context_title") or params.get("title")
     user_role = "Instructor"
 
+    # 2. Decode LTI 1.3 JWT ID Token if present
     if id_token:
         try:
             import jwt
@@ -101,15 +110,19 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
             context_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
             custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
+            lis_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/lis", {})
             roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
 
             c_id = (
-                context_claim.get("label") 
-                or context_claim.get("id") 
-                or custom_claim.get("course_id") 
+                custom_claim.get("course_id") 
                 or custom_claim.get("course_code")
-                or custom_claim.get("context_id") 
+                or custom_claim.get("courseid")
+                or custom_claim.get("context_label")
                 or custom_claim.get("CourseSection.id")
+                or lis_claim.get("course_offering_sourcedid")
+                or lis_claim.get("course_section_sourcedid")
+                or context_claim.get("label") 
+                or context_claim.get("id") 
             )
             c_name = (
                 context_claim.get("title") 
@@ -131,9 +144,9 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         except Exception as e:
             logger.warning(f"Error decoding id_token: {e}")
 
-    # Inspect HTTP Referer header or Request URL if course_id is missing or default
-    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1"]:
-        referer = request.headers.get("referer", "") or str(request.url)
+    # 3. Inspect HTTP Referer header or Request URL if course_id is missing or default
+    referer = request.headers.get("referer", "") or str(request.url)
+    if not course_id or course_id in ["TMSC001", "NTU_CZ4042_2026_S1", "CCE102-TST"] or course_id.startswith("_"):
         import re
         match = (
             re.search(r'/courses/([^/?]+)', referer)
@@ -146,10 +159,17 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
+    # 4. Extract clean NTU course code (e.g. 26S1-MKTG101 or MKTG101_2026 -> MKTG101)
+    if course_id:
+        import re
+        code_match = re.search(r'([A-Z]{2,4}\s*\d{3,4}[A-Z]?)', course_id, re.IGNORECASE)
+        if code_match and not course_id.startswith("_"):
+            course_id = code_match.group(1).upper()
+
     if not course_id:
         course_id = "CCE102-TST"
 
-    if not course_name or "CZ4042" in course_name or "TMSC001" in course_name:
+    if not course_name or "CZ4042" in course_name or "TMSC001" in course_name or course_name == f"{course_id} - Course Materials":
         course_name = f"{course_id} - Course Materials"
 
     logger.info(f"Resolved LTI context: course_id='{course_id}', course_name='{course_name}', role='{user_role}'")

@@ -343,6 +343,19 @@
                 logToTerminal(`<span class='text-red-400 font-bold'>Error testing auth: ${err.message}</span>`);
             }
         }
+
+        document.addEventListener("DOMContentLoaded", function() {
+            const params = new URLSearchParams(window.location.search);
+            const courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
+            if (courseParam) {
+                const input = document.getElementById("course-id-input");
+                if (input) input.value = courseParam.trim();
+                const titleEl = document.getElementById("course-title");
+                if (titleEl) {
+                    titleEl.innerText = `${courseParam.trim()} - Course Materials`;
+                }
+            }
+        });
     </script>
 </body>
 </html>
