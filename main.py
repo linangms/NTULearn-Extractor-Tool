@@ -86,6 +86,8 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         or params.get("context_label") 
         or params.get("context_id") 
         or params.get("custom_course_id")
+        or params.get("custom_course_code")
+        or params.get("custom_context_label")
         or params.get("lis_course_offering_sourcedid")
     )
     course_name = params.get("course_name") or params.get("context_title") or params.get("title")
@@ -105,6 +107,7 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
                 context_claim.get("label") 
                 or context_claim.get("id") 
                 or custom_claim.get("course_id") 
+                or custom_claim.get("course_code")
                 or custom_claim.get("context_id") 
                 or custom_claim.get("CourseSection.id")
             )
@@ -136,6 +139,7 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             re.search(r'/courses/([^/?]+)', referer)
             or re.search(r'course_id=([^&]+)', referer, re.IGNORECASE)
             or re.search(r'courseId=([^&]+)', referer, re.IGNORECASE)
+            or re.search(r'course=([^&]+)', referer, re.IGNORECASE)
         )
         if match:
             extracted = match.group(1)
@@ -200,9 +204,15 @@ async def lti_login(request: Request):
     client_id = params.get("client_id")
     login_hint = params.get("login_hint")
 
-    logger.info(f"LTI Login initiated from iss={iss}, target={target_link_uri}, client_id={client_id}")
+    logger.info(f"LTI Login initiated from iss={iss}, target={target_link_uri}, client_id={client_id}, params={params}")
 
     if iss and login_hint:
+        hidden_inputs = ""
+        for k, v in params.items():
+            if k not in ["iss", "client_id"]:
+                val = str(v) if v is not None else ""
+                hidden_inputs += f'<input type="hidden" name="{k}" value="{val}" />\n'
+
         response_html = f"""
         <html>
         <body>
@@ -210,6 +220,7 @@ async def lti_login(request: Request):
             <form id="lti_launch_form" action="{target_link_uri}" method="POST">
                 <input type="hidden" name="iss" value="{iss or ''}" />
                 <input type="hidden" name="client_id" value="{client_id or ''}" />
+                {hidden_inputs}
             </form>
             <script>document.getElementById('lti_launch_form').submit();</script>
         </body>
