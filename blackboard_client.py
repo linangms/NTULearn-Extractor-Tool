@@ -236,13 +236,19 @@ class BlackboardClient:
             "links": item.get("links", []),
         }
 
-        # Retrieve direct attachments for document / assignment items
+        # Retrieve direct attachments for document / assignment / video items
         attachments = await self.get_content_attachments(course_id, content_id)
+
+        MEDIA_EXTS = [
+            ".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls", ".zip", ".png", ".jpg", ".jpeg", ".svg",
+            ".mp4", ".m4v", ".webm", ".mov", ".avi", ".mkv", ".flv", ".wmv", ".3gp", ".m4a", ".mp3", ".wav",
+            ".vtt", ".srt", ".xml"
+        ]
         
-        # Also check item.links array for WebDAV / File resources
+        # Also check item.links array for WebDAV / File / Video resources
         for lk in item.get("links", []):
             href = lk.get("href", "")
-            if href and ("/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg"])):
+            if href and ("/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in MEDIA_EXTS)):
                 title_name = lk.get("title") or title
                 full_download_url = href if href.startswith("http") else f"{self.base_url}{href}"
                 attachments.append({
@@ -252,7 +258,7 @@ class BlackboardClient:
                     "originalUrl": href,
                 })
 
-        # Also extract embedded file links from body/description HTML
+        # Also extract embedded video, audio, track (captions/transcripts) and file links from body/description HTML
         body_html = item.get("body") or item.get("description") or item.get("instructions") or ""
         if body_html:
             try:
@@ -260,14 +266,15 @@ class BlackboardClient:
                 import urllib.parse
                 soup = BeautifulSoup(body_html, "html.parser")
                 idx = 0
+
+                # 1. Parse <a> tags
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"]
                     link_text = a_tag.get_text(strip=True) or f"File_{idx+1}"
-                    # Check if link points to a webdav file or attachment document
-                    if "/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4", ".m4a"]):
+                    if "/bbcswebdav/" in href or "/files/" in href or any(href.lower().endswith(ext) for ext in MEDIA_EXTS):
                         idx += 1
                         filename = link_text
-                        if not any(filename.lower().endswith(ext) for ext in [".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".mp4"]):
+                        if not any(filename.lower().endswith(ext) for ext in MEDIA_EXTS):
                             parsed_path = urllib.parse.urlparse(href).path
                             url_filename = parsed_path.split("/")[-1]
                             if url_filename and "." in url_filename:
@@ -280,8 +287,27 @@ class BlackboardClient:
                             "downloadUrl": full_download_url,
                             "originalUrl": href,
                         })
+
+                # 2. Parse <video>, <source>, <audio>, <iframe src="...">, and <track src="...">
+                for tag in soup.find_all(["video", "source", "audio", "iframe", "track"]):
+                    src = tag.get("src") or tag.get("href")
+                    if src and ("/bbcswebdav/" in src or "/files/" in src or any(src.lower().endswith(ext) for ext in MEDIA_EXTS)):
+                        idx += 1
+                        parsed_path = urllib.parse.urlparse(src).path
+                        url_filename = parsed_path.split("/")[-1] or f"video_media_{idx}.mp4"
+                        if not any(url_filename.lower().endswith(ext) for ext in MEDIA_EXTS):
+                            url_filename = f"{title}_{idx}.mp4"
+
+                        full_download_url = src if src.startswith("http") else f"{self.base_url}{src}"
+                        attachments.append({
+                            "id": f"media_{content_id}_{idx}",
+                            "fileName": url_filename,
+                            "downloadUrl": full_download_url,
+                            "originalUrl": src,
+                        })
+
             except Exception as e:
-                logger.warning(f"Could not parse HTML embedded links for {content_id}: {e}")
+                logger.warning(f"Could not parse HTML embedded links/media for {content_id}: {e}")
 
         node["attachments"] = attachments
 

@@ -21,9 +21,33 @@ def sanitize_filename(name: str) -> str:
     return sanitized or "Untitled"
 
 
+def clean_vtt_srt_transcript(text: str) -> str:
+    """
+    Cleans WebVTT (.vtt) and SubRip (.srt) subtitle content into readable plain text transcript.
+    """
+    if not text:
+        return ""
+    # Remove WEBVTT header
+    text = re.sub(r'^WEBVTT.*?\n', '', text, flags=re.IGNORECASE)
+    # Remove timestamp lines (e.g. 00:00:01.000 --> 00:00:04.000 or 00:00:01,000 --> 00:00:04,000)
+    text = re.sub(r'\d{2}:\d{2}:\d{2}[\.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text)
+    text = re.sub(r'\d{2}:\d{2}[\.,]\d{3}\s*-->\s*\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text)
+    # Remove standalone cue numbers
+    text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
+    # Remove HTML/XML cue tags like <v Speaker> or <c>
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    dedup_lines = []
+    for line in lines:
+        if not dedup_lines or line != dedup_lines[-1]:
+            dedup_lines.append(line)
+    return "\n\n".join(dedup_lines)
+
+
 def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> str:
     """
-    Extracts readable text content from PDF, PPTX, DOCX, TXT, or HTML attachment files.
+    Extracts readable text content from PDF, PPTX, DOCX, TXT, VTT, SRT, or HTML attachment files.
     """
     if not file_bytes:
         return ""
@@ -74,8 +98,16 @@ def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> str:
         except Exception as e:
             logger.warning(f"Could not extract text from DOCX {filename}: {e}")
 
-    # 4. Plain Text / HTML / Markdown
-    elif any(lower_name.endswith(ext) for ext in [".txt", ".html", ".htm", ".md", ".csv", ".json"]):
+    # 4. WebVTT / SRT Subtitle Transcript extraction
+    elif any(lower_name.endswith(ext) for ext in [".vtt", ".srt"]):
+        try:
+            raw_text = file_bytes.decode("utf-8", errors="ignore")
+            return clean_vtt_srt_transcript(raw_text)
+        except Exception as e:
+            logger.warning(f"Could not parse VTT/SRT transcript {filename}: {e}")
+
+    # 5. Plain Text / HTML / Markdown / XML
+    elif any(lower_name.endswith(ext) for ext in [".txt", ".html", ".htm", ".md", ".csv", ".json", ".xml"]):
         try:
             raw_text = file_bytes.decode("utf-8", errors="ignore")
             if lower_name.endswith(".html") or lower_name.endswith(".htm"):
@@ -209,6 +241,26 @@ class CourseMarkdownConverter:
                     or ""
                 )
 
+                handler = item.get("contentHandler", {})
+                handler_id = handler.get("id", "") if isinstance(handler, dict) else str(handler)
+                is_video_item = (
+                    "video" in handler_id.lower()
+                    or "kaltura" in handler_id.lower()
+                    or "panopto" in handler_id.lower()
+                    or "media" in handler_id.lower()
+                    or any(ext in body.lower() for ext in [".mp4", ".mov", ".m4v", ".webm"])
+                )
+
+                # If this is a video item with description/transcript text, write a dedicated .txt transcript file!
+                if is_video_item:
+                    clean_item_title = sanitize_filename(item.get("title", "Video"))
+                    txt_filename = f"{clean_item_title}_transcript.txt"
+                    if txt_filename not in doc_text_map:
+                        clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
+                        if clean_body_text and len(clean_body_text) > 10:
+                            zf.writestr(f"{out_folder}/{txt_filename}", clean_body_text)
+                            doc_text_map[txt_filename] = clean_body_text
+
                 md_text = self.convert_html_to_markdown(body, attachment_map)
 
                 full_md = f"# {item.get('title')}\n\n"
@@ -218,10 +270,11 @@ class CourseMarkdownConverter:
                 if md_text and md_text.strip():
                     full_md += f"{md_text.strip()}\n\n"
 
-                # Append text extracted directly from attached PDF / PPTX / DOCX / TXT files!
+                # Append text extracted directly from attached PDF / PPTX / DOCX / TXT / Video Transcripts!
                 if doc_text_map:
                     for att_file, doc_text in doc_text_map.items():
-                        full_md += f"## Extracted Content from Document (`{att_file}`)\n\n"
+                        section_heading = "Video Transcript" if "transcript" in att_file.lower() or att_file.endswith(".txt") else "Extracted Content from Document"
+                        full_md += f"## {section_heading} (`{att_file}`)\n\n"
                         full_md += f"{doc_text}\n\n"
 
                 if item.get("attachments"):
@@ -269,6 +322,15 @@ class CourseMarkdownConverter:
                             extracted_text = extract_text_from_file_bytes(data, filename)
                             if extracted_text and extracted_text.strip():
                                 doc_text_map[filename] = extracted_text
+
+                                # If this attachment is a VTT / SRT subtitle file, also save a dedicated .txt transcript file!
+                                lower_fn = filename.lower()
+                                if any(lower_fn.endswith(ext) for ext in [".vtt", ".srt"]):
+                                    clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                    txt_filename = f"{clean_node_title}_transcript.txt"
+                                    txt_target_path = f"{self.root_folder_name}/{txt_filename}"
+                                    zf.writestr(txt_target_path, extracted_text)
+                                    doc_text_map[txt_filename] = extracted_text
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
 
