@@ -64,6 +64,12 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 # Default Blackboard REST API configuration (can be overriden by env vars)
 BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
+KNOWN_COURSE_MAP = {
+    "623": "CCE102-Tst",
+    "626": "MKTG101",
+    "646": "MKTG101",
+}
+
 
 async def extract_lti_context(request: Request) -> Dict[str, str]:
     """
@@ -346,9 +352,10 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     course_id = clean_course_id_string(course_id)
 
     if course_id:
-        if not course_name or course_name == "Course Materials Extractor" or course_name == course_id or course_name.isdigit():
-            if clean_course_id_string(course_id) in ["626", "646"]:
-                course_name = "MKTG101"
+        if not course_name or course_name == "Course Materials Extractor" or course_name == course_id or course_name.isdigit() or course_name.startswith("Course "):
+            c_clean = clean_course_id_string(course_id)
+            if c_clean in KNOWN_COURSE_MAP:
+                course_name = KNOWN_COURSE_MAP[c_clean]
             else:
                 course_name = course_id
     else:
@@ -375,8 +382,9 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     user_role = session_data.get("user_role") or context["user_role"]
 
     if course_id and (not course_name or course_name.startswith("Course ") or course_name == "Course Materials Extractor" or course_name == course_id or course_name.isdigit()):
-        if clean_course_id_string(course_id) in ["626", "646"]:
-            course_name = "MKTG101"
+        c_clean = clean_course_id_string(course_id)
+        if c_clean in KNOWN_COURSE_MAP:
+            course_name = KNOWN_COURSE_MAP[c_clean]
         import os
         bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
         bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
