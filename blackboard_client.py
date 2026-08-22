@@ -155,6 +155,8 @@ class BlackboardClient:
                         return data["results"][0]
                     return data
         known = {
+            "560": "TMSC001",
+            "_560_1": "TMSC001",
             "623": "CCE102-Tst",
             "_623_1": "CCE102-Tst",
             "626": "MKTG101",

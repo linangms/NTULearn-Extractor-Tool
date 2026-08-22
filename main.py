@@ -65,6 +65,7 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
 
 KNOWN_COURSE_MAP = {
+    "560": "TMSC001",
     "623": "CCE102-Tst",
     "626": "MKTG101",
     "646": "MKTG101",
