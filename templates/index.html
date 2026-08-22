@@ -58,8 +58,7 @@
                     </h2>
                     <p class="text-sm text-slate-500 mt-2 flex flex-wrap items-center gap-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
-                            <input id="course-id-input" type="text" value="{{ course_id }}" class="ml-1.5 px-2.5 py-1 text-sm font-bold text-slate-900 bg-amber-50 border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-ntuRed focus:bg-white transition-all w-40 shadow-sm" title="Course ID passed from Blackboard launch (or edit here)" placeholder="Enter Course ID e.g. MKTG101" />
-                            <span id="course-id" class="hidden">{{ course_id }}</span>
+                            <strong id="course-id" class="ml-1.5 px-2.5 py-0.5 text-sm font-extrabold text-slate-900 bg-slate-100 border border-slate-300 rounded-md shadow-sm">{{ course_id }}</strong>
                         </span>
                         <span><i class="fa-solid fa-user-tie text-slate-400 mr-1"></i> User Role: <strong class="text-slate-700">{{ user_role if user_role else "Instructor" }}</strong></span>
                     </p>
@@ -247,8 +246,7 @@
             logToTerminal(`<span class='text-amber-400'>Starting extraction task (${modeLabel})...</span>`);
             updateStageUI(1);
 
-            const courseIdInput = document.getElementById("course-id-input");
-            const courseId = (courseIdInput && courseIdInput.value.trim()) ? courseIdInput.value.trim() : document.getElementById("course-id").innerText.trim();
+            const courseId = document.getElementById("course-id").innerText.trim();
             const courseTitle = document.getElementById("course-title").innerText.trim();
             const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}&mode=${encodeURIComponent(mode)}`;
 
@@ -345,9 +343,10 @@
         }
 
         document.addEventListener("DOMContentLoaded", function() {
-            const courseInput = document.getElementById("course-id-input");
+            const courseIdEl = document.getElementById("course-id");
             const titleEl = document.getElementById("course-title");
 
+            const params = new URLSearchParams(window.location.search);
             let courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
             if (!courseParam && document.referrer) {
                 const refMatch = document.referrer.match(/\/courses\/([^/?#]+)/i)
@@ -358,20 +357,9 @@
                 }
             }
 
-            if (courseParam && courseInput) {
-                courseInput.value = courseParam.trim();
-                if (titleEl) {
-                    titleEl.innerText = `${courseParam.trim()} - Course Materials`;
-                }
-            }
-
-            if (courseInput) {
-                courseInput.addEventListener("input", function() {
-                    const val = courseInput.value.trim();
-                    if (titleEl) {
-                        titleEl.innerText = val ? `${val} - Course Materials` : "Course Materials Extractor";
-                    }
-                });
+            if (courseParam) {
+                if (courseIdEl) courseIdEl.innerText = courseParam.trim();
+                if (titleEl) titleEl.innerText = `${courseParam.trim()} - Course Materials`;
             }
         });
     </script>
