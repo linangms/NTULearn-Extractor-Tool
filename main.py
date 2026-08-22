@@ -589,7 +589,11 @@ async def extract_course_stream(
             yield f"data: {json.dumps({'stage': 1, 'progress': 10, 'message': f'Connecting to Blackboard REST API for course {course_id}...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            display_title = course_title or f"{course_id} - Course Materials"
+            c_clean = clean_course_id_string(course_id)
+            if not course_title or course_title == course_id or course_title.isdigit() or course_title.startswith("Course "):
+                display_title = KNOWN_COURSE_MAP.get(c_clean, course_title or course_id)
+            else:
+                display_title = course_title
 
             # Check if environment variables for real Blackboard REST API exist
             import os
