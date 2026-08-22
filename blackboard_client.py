@@ -123,11 +123,17 @@ class BlackboardClient:
         course_id_str = str(course_id).strip()
         if course_id_str in self._resolved_course_ids:
             return [self._resolved_course_ids[course_id_str]]
-        if course_id_str.startswith("_") or course_id_str.startswith("courseId:"):
-            return [course_id_str]
-        if course_id_str.isdigit():
+        
+        import re
+        m = re.search(r'^\_?(\d+)(?:\_1)?$', course_id_str)
+        if m:
+            pk = m.group(1)
+            fmt = f"_{pk}_1"
+            return [fmt, f"courseId:{pk}", f"courseId:{course_id_str}"]
+        
+        if not course_id_str.startswith("_") and not course_id_str.startswith("courseId:"):
             return [f"_{course_id_str}_1", f"courseId:{course_id_str}"]
-        return [f"courseId:{course_id_str}"]
+        return [course_id_str]
 
     def _format_course_id(self, course_id: str) -> str:
         candidates = self._get_course_id_candidates(course_id)
