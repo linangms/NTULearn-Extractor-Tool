@@ -343,6 +343,19 @@
                     }
                 }
                 if (courseIdEl) courseIdEl.innerText = clean;
+
+                // Dynamically fetch courseId from Blackboard API to display under Target Course
+                fetch(`/api/course_details?course_id=${encodeURIComponent(clean)}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data && data.course_code && titleEl) {
+                            const cleanT = data.course_code.replace(/^\s*Course\s+/i, '').replace(/\s*-\s*Course Materials$/i, '').replace(/\s*Course Materials$/i, '').trim();
+                            if (cleanT && cleanT !== clean) {
+                                titleEl.innerText = `${cleanT} Course Materials`;
+                            }
+                        }
+                    })
+                    .catch(err => console.error("Error fetching course details:", err));
             }
         });
     </script>

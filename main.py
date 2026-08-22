@@ -399,6 +399,36 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     )
 
 
+@app.get("/api/course_details")
+async def api_course_details(course_id: str = Query(...)):
+    clean_id = clean_course_id_string(course_id)
+    import os
+    bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
+    bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
+    bb_base_url = os.environ.get("BLACKBOARD_BASE_URL", BLACKBOARD_BASE_URL)
+    
+    course_code = clean_id
+    course_name = f"Course {clean_id}"
+    
+    try:
+        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
+            if bb_client_id and bb_client_secret:
+                await bb_client.authenticate()
+            details = await bb_client.get_course_details(clean_id)
+            if details:
+                course_code = details.get("courseId") or details.get("name") or clean_id
+                course_name = details.get("name") or course_code
+    except Exception as e:
+        logger.warning(f"Error in api_course_details for {course_id}: {e}")
+
+    return {
+        "course_id": clean_id,
+        "course_code": course_code,
+        "course_name": course_name,
+        "display_title": f"{course_code} Course Materials" if course_code and not course_code.endswith("Course Materials") else course_code
+    }
+
+
 @app.api_route("/lti/login", methods=["GET", "POST"])
 async def lti_login(request: Request):
     """
