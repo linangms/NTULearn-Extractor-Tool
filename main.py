@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from blackboard_client import BlackboardClient
-from converter import CourseMarkdownConverter
+from converter import CourseMarkdownConverter, sanitize_filename
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ntulearn_extractor")
