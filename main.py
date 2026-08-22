@@ -317,8 +317,8 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     course_id = clean_course_id_string(course_id)
 
     if course_id:
-        if not course_name or course_name == f"{course_id} - Course Materials":
-            course_name = f"{course_id} - Course Materials"
+        if not course_name or course_name == "Course Materials Extractor":
+            course_name = f"Course {course_id}"
     else:
         course_name = "Course Materials Extractor"
 
@@ -739,12 +739,14 @@ async def download_package(task_id: str):
 
     zip_bytes = task["zip_bytes"]
     mode = task.get("mode", "markdown")
-    course_id = sanitize_filename(task.get("course_id", "course"))
+    course_name_raw = task.get("course_title") or task.get("course_id") or "Course"
+    clean_name = re.sub(r'\s*-\s*Course Materials$', '', course_name_raw, flags=re.IGNORECASE).strip()
+    safe_name = sanitize_filename(clean_name or course_name_raw)
 
     if mode == "raw":
-        filename = f"{course_id}_package.zip"
+        filename = f"{safe_name}_package.zip"
     else:
-        filename = f"{course_id}_markdown_package.zip"
+        filename = f"{safe_name}_markdown_package.zip"
 
     return Response(
         content=zip_bytes,

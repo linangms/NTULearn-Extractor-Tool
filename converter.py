@@ -127,10 +127,11 @@ class CourseMarkdownConverter:
     """
 
     def __init__(self, course_name: str, course_id: str):
-        self.course_name = course_name
-        self.course_name = course_name or "Course Materials"
+        self.course_name = course_name or course_id or "Course Materials"
         self.course_id = course_id
-        self.root_folder_name = sanitize_filename(f"{course_id}_Markdown")
+        clean_name = re.sub(r'\s*-\s*Course Materials$', '', self.course_name, flags=re.IGNORECASE).strip()
+        self.clean_course_name = clean_name or self.course_name
+        self.root_folder_name = sanitize_filename(f"{self.clean_course_name}_Markdown")
 
     def convert_html_to_markdown(self, html_content: str, attachment_map: Optional[Dict[str, str]] = None) -> str:
         if not html_content or not html_content.strip():
@@ -356,7 +357,8 @@ class CourseMarkdownConverter:
         """
         zip_buffer = io.BytesIO()
         total_nodes = self._count_nodes(content_tree)
-        root_dir = sanitize_filename(f"{self.course_id}_RawFiles")
+        safe_name = sanitize_filename(self.clean_course_name)
+        root_dir = f"{safe_name}_RawFiles"
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             await self._process_raw_node_list(

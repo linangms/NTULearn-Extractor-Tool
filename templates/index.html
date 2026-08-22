@@ -53,10 +53,10 @@
                         <i class="fa-solid fa-graduation-cap"></i>
                         <span>Target Course</span>
                     </div>
-                    <h2 class="text-2xl font-extrabold text-slate-900" id="course-title">
-                        {{ course_name if course_name else "Course Materials Extractor" }}
+                    <h2 class="text-2xl font-bold text-slate-800 tracking-tight flex items-center space-x-2">
+                        <span id="course-title">{{ course_name if "Course Materials" in course_name else course_name + " - Course Materials" }}</span>
                     </h2>
-                    <p class="text-sm text-slate-500 mt-2 flex flex-wrap items-center gap-4">
+                    <p class="text-sm text-slate-500 mt-1 flex items-center space-x-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
                             <strong id="course-id" class="ml-1.5 px-2.5 py-0.5 text-sm font-extrabold text-slate-900 bg-slate-100 border border-slate-300 rounded-md shadow-sm">{{ course_id }}</strong>
                         </span>
@@ -65,10 +65,6 @@
                 </div>
 
                 <div class="flex flex-wrap items-center gap-3">
-                    <button id="test-auth-btn" onclick="testAuth()" class="bg-slate-700 hover:bg-slate-800 text-white font-semibold px-4 py-3 rounded-xl shadow-sm transition-all duration-200 flex items-center space-x-2 text-sm hover:shadow active:scale-95" title="Test live Blackboard OAuth REST API authentication">
-                        <i class="fa-solid fa-key text-amber-400"></i>
-                        <span>Test REST API Auth</span>
-                    </button>
                     <button id="extract-raw-btn" onclick="startExtraction('raw')" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-3 rounded-xl shadow-md transition-all duration-200 flex items-center space-x-2 hover:shadow-lg active:scale-95" title="Download all original raw files, slides, PDFs and documents">
                         <i class="fa-solid fa-cloud-arrow-down"></i>
                         <span>Download Raw Course Files (.zip)</span>
@@ -310,38 +306,6 @@
             };
         }
 
-        async function testAuth() {
-            const progressCard = document.getElementById("progress-card");
-            progressCard.classList.remove("hidden");
-            logToTerminal("<span class='text-sky-400 font-bold'>[Auth Test] Initiating live OAuth test against Blackboard REST API...</span>");
-
-            try {
-                const response = await fetch("/api/test-auth");
-                const result = await response.json();
-
-                if (result.status === "success") {
-                    logToTerminal(`<span class='text-emerald-400 font-bold'>✓ [SUCCESS] ${result.message}</span>`);
-                    logToTerminal(`<span class='text-slate-300'>Target Base URL: <code>${result.base_url}</code></span>`);
-                    logToTerminal(`<span class='text-slate-300'>Access Token Preview: <code>${result.access_token_preview}</code></span>`);
-                    alert("Authentication Successful! Blackboard REST API credentials are active and verified.");
-                } else if (result.status === "missing_credentials") {
-                    logToTerminal(`<span class='text-amber-400 font-bold'>⚠ [NOTICE] ${result.message}</span>`);
-                    logToTerminal("<span class='text-slate-300'>Set BLACKBOARD_CLIENT_ID and BLACKBOARD_CLIENT_SECRET in Render Environment Variables.</span>");
-                    alert("Environment Variables Missing: Please add BLACKBOARD_CLIENT_ID and BLACKBOARD_CLIENT_SECRET on Render.");
-                } else {
-                    logToTerminal(`<span class='text-red-400 font-bold'>✗ [FAILED] ${result.message}</span>`);
-                    if (result.troubleshooting) {
-                        result.troubleshooting.forEach(tip => {
-                            logToTerminal(`<span class='text-slate-300'>• ${tip}</span>`);
-                        });
-                    }
-                    alert(`Authentication Failed: ${result.message}`);
-                }
-            } catch (err) {
-                logToTerminal(`<span class='text-red-400 font-bold'>Error testing auth: ${err.message}</span>`);
-            }
-        }
-
         document.addEventListener("DOMContentLoaded", function() {
             const courseIdEl = document.getElementById("course-id");
             const titleEl = document.getElementById("course-title");
@@ -374,7 +338,9 @@
                     }
                 }
                 if (courseIdEl) courseIdEl.innerText = clean;
-                if (titleEl) titleEl.innerText = `${clean} - Course Materials`;
+                if (titleEl && (titleEl.innerText.includes("Course Materials Extractor") || titleEl.innerText.startsWith("Course "))) {
+                    titleEl.innerText = `${clean} - Course Materials`;
+                }
             }
         });
     </script>
