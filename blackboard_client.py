@@ -148,11 +148,22 @@ class BlackboardClient:
             for api_version in ["v3", "v1"]:
                 url = f"{self.base_url}/learn/api/public/{api_version}/courses/{fmt_id}"
                 resp = await self._request_with_retry("GET", url)
+                
                 if resp.status_code == 200:
-                    self._resolved_course_ids[str(course_id).strip()] = fmt_id
                     data = resp.json()
-                    if "results" in data and isinstance(data["results"], list) and len(data["results"]) > 0:
-                        return data["results"][0]
+                    
+                    # Direct GET /courses/{id} returns a dict directly
+                    if isinstance(data, dict) and "courseId" in data:
+                        self._resolved_course_ids[str(course_id).strip()] = data.get("id", fmt_id)
+                        return data
+                    
+                    # Search/Filter endpoints return {"results": [...]}
+                    if isinstance(data, dict) and "results" in data and isinstance(data["results"], list) and len(data["results"]) > 0:
+                        course_data = data["results"][0]
+                        self._resolved_course_ids[str(course_id).strip()] = course_data.get("id", fmt_id)
+                        return course_data
+
+        # Return empty or fallback only if all candidate requests fail (e.g. 404s)
         return {"id": course_id, "name": f"Course {course_id}", "courseId": course_id}
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
