@@ -429,6 +429,7 @@ class CourseMarkdownConverter:
                     )
             else:
                 # Raw attachments placed directly into current_dir
+                downloaded_any = False
                 if attachments:
                     for att in attachments:
                         att_id = att.get("downloadUrl") or att.get("id")
@@ -440,14 +441,69 @@ class CourseMarkdownConverter:
                                 await progress_callback(f"Downloading file: {filename}...", pct)
                             try:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
-                                if data:
+                                if data and len(data) > 100:
                                     zf.writestr(zip_target_path, data)
+                                    downloaded_any = True
                                     if progress_callback:
                                         await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
-                else:
-                    # Fallback for content items with no attachments: save body HTML if present
-                    body = node.get("body") or node.get("description") or node.get("instructions") or ""
+
+                # Check if this item is a Kaltura / Panopto / Video item
+                body = node.get("body") or node.get("description") or node.get("instructions") or ""
+                handler = str(node.get("contentHandler", "")).lower()
+                is_kaltura_or_video = (
+                    "kaltura" in handler
+                    or "video" in handler
+                    or "panopto" in handler
+                    or "kaltura" in body.lower()
+                    or "panopto" in body.lower()
+                    or any(att.get("isKaltura") for att in attachments)
+                )
+
+                if is_kaltura_or_video:
+                    # Write interactive HTML video launcher & URL shortcut for Kaltura/video items
+                    embed_url = ""
+                    for att in attachments:
+                        if att.get("originalUrl"):
+                            embed_url = att.get("originalUrl")
+                            break
+                        elif att.get("downloadUrl"):
+                            embed_url = att.get("downloadUrl")
+                            break
+                    if not embed_url:
+                        import re
+                        m = re.search(r'href=["\']([^"\']+)["\']|src=["\']([^"\']+)["\']', body)
+                        if m:
+                            embed_url = m.group(1) or m.group(2) or ""
+
+                    if embed_url:
+                        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{title} - Video</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #0f172a; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 90vh; }}
+        h1 {{ margin-bottom: 20px; font-size: 1.5rem; text-align: center; }}
+        .video-container {{ width: 100%; max-width: 960px; aspect-ratio: 16/9; background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }}
+        iframe {{ width: 100%; height: 100%; border: none; }}
+        .btn {{ margin-top: 20px; padding: 12px 24px; background: #2563eb; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; }}
+        .btn:hover {{ background: #1d4ed8; }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <div class="video-container">
+        <iframe src="{embed_url}" allowfullscreen allow="autoplay; fullscreen; encrypted-media"></iframe>
+    </div>
+    <a class="btn" href="{embed_url}" target="_blank">Open Video in Browser</a>
+</body>
+</html>"""
+                        zf.writestr(f"{current_dir}/{title}_Kaltura_Video.html", html_content)
+                        zf.writestr(f"{current_dir}/{title}_Kaltura_Link.url", f"[InternetShortcut]\nURL={embed_url}\n")
+
+                elif not downloaded_any:
+                    # Fallback for general content items with no attachments: save body HTML if present
                     if body and body.strip():
                         zf.writestr(f"{current_dir}/{title}.html", f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title></head><body><h1>{node.get('title')}</h1>{body}</body></html>")

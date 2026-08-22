@@ -293,7 +293,7 @@ class BlackboardClient:
                         })
 
                 # 2. Parse <video>, <source>, <audio>, <iframe src="...">, and <track src="...">
-                for tag in soup.find_all(["video", "source", "audio", "iframe", "track"]):
+                for tag in soup.find_all(["video", "source", "audio", "iframe", "embed", "track"]):
                     src = tag.get("src") or tag.get("href")
                     if src and ("/bbcswebdav/" in src or "/files/" in src or any(src.lower().endswith(ext) for ext in MEDIA_EXTS)):
                         idx += 1
@@ -309,6 +309,49 @@ class BlackboardClient:
                             "downloadUrl": full_download_url,
                             "originalUrl": src,
                         })
+
+                # 3. Parse Kaltura & Panopto & Media Embeds and Links
+                import re
+                kaltura_entries = set()
+
+                for tag in soup.find_all(["a", "iframe", "embed", "video", "source"]):
+                    val = tag.get("src") or tag.get("href") or ""
+                    if any(k in val.lower() for k in ["kaltura", "panopto", "calt.ntu.edu.sg", "media.ntu.edu.sg", "video.ntu.edu.sg", "cdnapisec.kaltura.com"]):
+                        e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', val, re.I)
+                        if e_match:
+                            entry_id = e_match.group(1)
+                            kaltura_entries.add((entry_id, val))
+                        else:
+                            idx += 1
+                            full_url = val if val.startswith("http") else f"{self.base_url}{val}"
+                            attachments.append({
+                                "id": full_url,
+                                "fileName": f"{title}_video_{idx}.mp4",
+                                "downloadUrl": full_url,
+                                "originalUrl": val,
+                                "isKaltura": True,
+                            })
+
+                # Regex search entire body_html for any Kaltura entry_id strings (e.g. 1_abc12345 or 0_98765432)
+                for e_match in re.finditer(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', body_html, re.I):
+                    entry_id = e_match.group(1)
+                    if not any(e[0] == entry_id for e in kaltura_entries):
+                        kaltura_entries.add((entry_id, f"https://cdnapisec.kaltura.com/p/0/sp/0/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"))
+
+                for entry_id, orig_url in kaltura_entries:
+                    idx += 1
+                    p_match = re.search(r'/p/(\d+)', orig_url)
+                    partner_id = p_match.group(1) if p_match else "0"
+                    manifest_url = f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"
+
+                    attachments.append({
+                        "id": manifest_url,
+                        "fileName": f"{title}.mp4" if idx == 1 else f"{title}_video_{idx}.mp4",
+                        "downloadUrl": manifest_url,
+                        "originalUrl": orig_url,
+                        "isKaltura": True,
+                        "entryId": entry_id,
+                    })
 
             except Exception as e:
                 logger.warning(f"Could not parse HTML embedded links/media for {content_id}: {e}")
