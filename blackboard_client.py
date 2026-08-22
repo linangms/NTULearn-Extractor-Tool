@@ -135,15 +135,19 @@ class BlackboardClient:
 
     async def get_course_details(self, course_id: str) -> Dict[str, Any]:
         """
-        Retrieves basic details about a course.
+        Retrieves basic details about a course via Blackboard v3/v1 API.
         """
         candidates = self._get_course_id_candidates(course_id)
         for fmt_id in candidates:
-            url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}"
-            resp = await self._request_with_retry("GET", url)
-            if resp.status_code == 200:
-                self._resolved_course_ids[str(course_id).strip()] = fmt_id
-                return resp.json()
+            for api_version in ["v3", "v1"]:
+                url = f"{self.base_url}/learn/api/public/{api_version}/courses/{fmt_id}"
+                resp = await self._request_with_retry("GET", url)
+                if resp.status_code == 200:
+                    self._resolved_course_ids[str(course_id).strip()] = fmt_id
+                    data = resp.json()
+                    if "results" in data and isinstance(data["results"], list) and len(data["results"]) > 0:
+                        return data["results"][0]
+                    return data
         known = {
             "623": "CCE102-Tst",
             "_623_1": "CCE102-Tst",
