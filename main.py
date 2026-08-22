@@ -159,14 +159,9 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
             logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
-    # 4. Extract clean NTU course code (e.g. 26S1-MKTG101 or MKTG101_2026 -> MKTG101)
     if course_id:
-        import re
-        code_match = re.search(r'([A-Z]{2,4}\s*\d{3,4}[A-Z]?)', course_id, re.IGNORECASE)
-        if code_match and not course_id.startswith("_"):
-            course_id = code_match.group(1).upper()
-
-    if not course_id:
+        course_id = str(course_id).strip()
+    else:
         course_id = ""
 
     if course_id:
