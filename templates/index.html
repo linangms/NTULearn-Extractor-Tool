@@ -348,8 +348,16 @@
             const courseInput = document.getElementById("course-id-input");
             const titleEl = document.getElementById("course-title");
 
-            const params = new URLSearchParams(window.location.search);
-            const courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
+            let courseParam = params.get("course_id") || params.get("courseId") || params.get("course") || params.get("c");
+            if (!courseParam && document.referrer) {
+                const refMatch = document.referrer.match(/\/courses\/([^/?#]+)/i)
+                              || document.referrer.match(/course_id=([^&#]+)/i)
+                              || document.referrer.match(/courseId=([^&#]+)/i);
+                if (refMatch) {
+                    courseParam = decodeURIComponent(refMatch[1]);
+                }
+            }
+
             if (courseParam && courseInput) {
                 courseInput.value = courseParam.trim();
                 if (titleEl) {
