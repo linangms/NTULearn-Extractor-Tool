@@ -54,7 +54,7 @@
                         <span>Target Course</span>
                     </div>
                     <h2 class="text-2xl font-bold text-slate-800 tracking-tight flex items-center space-x-2">
-                        <span id="course-title">{{ course_name if "Course Materials" in course_name else course_name + " Course Materials" }}</span>
+                        <span id="course-title">{% set clean_t = course_name.replace("Course ", "") if course_name else "Course Materials" %}{{ clean_t if "Course Materials" in clean_t else clean_t + " Course Materials" }}</span>
                     </h2>
                     <p class="text-sm text-slate-500 mt-1 flex items-center space-x-4">
                         <span class="flex items-center"><i class="fa-solid fa-hashtag text-slate-400 mr-1.5"></i> Course ID: 
@@ -267,7 +267,7 @@
                     }
 
                     if (data.course_title && titleEl) {
-                        const cleanT = data.course_title.replace(/\s*-\s*Course Materials$/i, '').replace(/\s*Course Materials$/i, '').trim();
+                        const cleanT = data.course_title.replace(/^\s*Course\s+/i, '').replace(/\s*-\s*Course Materials$/i, '').replace(/\s*Course Materials$/i, '').trim();
                         titleEl.innerText = `${cleanT} Course Materials`;
                     }
 

@@ -93,9 +93,9 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
 
     # Fallback regex extraction from raw unquoted URL string (handles course_id%253D_626_1 or course_id=_626_1)
     m_course = (
-        re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        re.search(r'\bcourse_id(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'\bcustom_course_id(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
+        or re.search(r'\bcourse(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
     )
     if m_course and "course_id" not in params:
         params["course_id"] = m_course.group(1)
@@ -116,12 +116,18 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     )
     course_name = (
         params_lower.get("course_name")
+        or params_lower.get("course_title")
+        or params_lower.get("coursetitle")
+        or params_lower.get("coursename")
         or params_lower.get("context_title")
         or params_lower.get("custom_course_name")
+        or params_lower.get("custom_course_title")
         or params_lower.get("custom_course_code")
         or params_lower.get("custom_context_title")
         or params_lower.get("custom_context_label")
         or params_lower.get("context_label")
+        or params_lower.get("lis_course_offering_sourcedid")
+        or params_lower.get("lis_course_section_sourcedid")
         or params_lower.get("title")
     )
     user_role = "Instructor"
@@ -308,21 +314,33 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     if not course_id:
         match = (
             re.search(r'/courses/([^/?]+)', unquoted_referer)
-            or re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
-            or re.search(r'courseId[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
-            or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcourse_id(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcourseId(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcourse(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
         )
         if match:
             extracted = match.group(1)
             logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
             course_id = extracted
 
+    if not course_name or course_name == course_id or course_name == "Course Materials Extractor":
+        match_title = (
+            re.search(r'\bcourse_title[=:=%253D%3D]+([^&]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcourse_name[=:=%253D%3D]+([^&]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcontext_title[=:=%253D%3D]+([^&]+)', unquoted_referer, re.IGNORECASE)
+            or re.search(r'\bcustom_course_code[=:=%253D%3D]+([^&]+)', unquoted_referer, re.IGNORECASE)
+        )
+        if match_title:
+            extracted_title = urllib.parse.unquote(match_title.group(1)).strip()
+            logger.info(f"Extracted course_name '{extracted_title}' from Referer/URL: {referer}")
+            course_name = extracted_title
+
     # Clean course_id string (handles _626_1%2C86cb... -> 626)
     course_id = clean_course_id_string(course_id)
 
     if course_id:
         if not course_name or course_name == "Course Materials Extractor":
-            course_name = f"Course {course_id}"
+            course_name = course_id
     else:
         course_name = "Course Materials Extractor"
 
@@ -346,7 +364,7 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
     course_id = session_data.get("course_id") or context["course_id"]
     user_role = session_data.get("user_role") or context["user_role"]
 
-    if course_id and (not course_name or course_name.startswith("Course ") or course_name == "Course Materials Extractor"):
+    if course_id and (not course_name or course_name.startswith("Course ") or course_name == "Course Materials Extractor" or course_name.isdigit()):
         import os
         bb_client_id = os.environ.get("BLACKBOARD_CLIENT_ID")
         bb_client_secret = os.environ.get("BLACKBOARD_CLIENT_SECRET")
@@ -357,7 +375,7 @@ async def dashboard(request: Request, session_id: Optional[str] = Query(None)):
                     await bb_client.authenticate()
                     details = await bb_client.get_course_details(course_id)
                     resolved_name = details.get("courseId") or details.get("name")
-                    if resolved_name:
+                    if resolved_name and not resolved_name.startswith("Course "):
                         course_name = resolved_name
             except Exception as e:
                 logger.warning(f"Could not resolve course name for dashboard: {e}")
