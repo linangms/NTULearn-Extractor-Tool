@@ -29,6 +29,7 @@ class BlackboardClient:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self._client: Optional[httpx.AsyncClient] = None
+        self._resolved_course_ids: Dict[str, str] = {}
 
     async def __aenter__(self):
         self._client = httpx.AsyncClient(timeout=30.0)
@@ -59,62 +60,37 @@ class BlackboardClient:
 
         url = f"{self.base_url}/learn/api/public/v1/oauth2/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        data = {"grant_type": "client_credentials"}
 
-        client = self._client or httpx.AsyncClient()
+        client = self._client or httpx.AsyncClient(timeout=30.0)
         try:
-            # Attempt 1: HTTP Basic Auth with grant_type=client_credentials
-            response = await client.post(
-                url,
-                data={"grant_type": "client_credentials"},
-                headers=headers,
-                auth=(client_id, client_secret),
-            )
-
-            # Attempt 2: Form Body parameters if Attempt 1 fails
-            if response.status_code != 200:
-                logger.info(f"Attempt 1 returned {response.status_code}, trying Form Body credentials...")
-                response = await client.post(
-                    url,
-                    data={
-                        "grant_type": "client_credentials",
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                    },
-                    headers=headers,
-                )
-
-            if response.status_code != 200:
-                err_detail = response.text
-                try:
-                    err_json = response.json()
-                    err_detail = err_json.get("error_description") or err_json.get("error") or response.text
-                except Exception:
-                    pass
-                logger.error(f"Blackboard OAuth token request failed ({response.status_code}): {err_detail}")
-                raise Exception(f"HTTP {response.status_code}: {err_detail}")
-
-            token_data = response.json()
-            self.access_token = token_data.get("access_token")
-            logger.info("Successfully authenticated with Blackboard REST API.")
-            return self.access_token
+            resp = await client.post(url, data=data, headers=headers, auth=(client_id, client_secret))
+            if resp.status_code == 200:
+                token_data = resp.json()
+                self.access_token = token_data.get("access_token")
+                logger.info("OAuth2 authentication successful.")
+                return self.access_token
+            else:
+                logger.error(f"OAuth2 authentication failed with status {resp.status_code}: {resp.text}")
+                raise RuntimeError(f"Authentication failed: {resp.status_code} {resp.text}")
         finally:
             if not self._client:
                 await client.aclose()
 
     async def _request_with_retry(
-        self, method: str, url: str, **kwargs
+        self,
+        method: str,
+        url: str,
+        **kwargs
     ) -> httpx.Response:
         """
-        Executes HTTP request with exponential backoff for HTTP 429 rate limits.
+        Executes an HTTP request with automatic retry handling for rate-limiting (429)
+        and transient network errors.
         """
-        client = self._client or httpx.AsyncClient(follow_redirects=True)
+        client = self._client or httpx.AsyncClient(timeout=30.0)
         close_needed = self._client is None
-        kwargs.setdefault("follow_redirects", True)
 
-        headers = self._get_headers()
-        if "headers" in kwargs:
-            headers.update(kwargs["headers"])
-        kwargs["headers"] = headers
+        kwargs["headers"] = {**self._get_headers(), **kwargs.get("headers", {})}
 
         retry_count = 0
         delay = 1.0
@@ -122,31 +98,16 @@ class BlackboardClient:
         try:
             while True:
                 try:
-                    response = await client.request(method, url, **kwargs)
-
-                    if response.status_code == 429:
+                    resp = await client.request(method, url, **kwargs)
+                    if resp.status_code == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        sleep_time = float(retry_after) if retry_after else delay
+                        logger.warning(f"Rate limited (429). Retrying after {sleep_time}s...")
+                        await asyncio.sleep(sleep_time)
                         retry_count += 1
-                        if retry_count > self.max_retries:
-                            logger.error(f"Rate limit exceeded after {self.max_retries} retries for {url}")
-                            response.raise_for_status()
-
-                        # Respect Retry-After header if present
-                        retry_after = response.headers.get("Retry-After")
-                        wait_time = float(retry_after) if retry_after else delay
-                        logger.warning(
-                            f"HTTP 429 Rate Limit encountered. Retrying in {wait_time:.2f}s (Attempt {retry_count}/{self.max_retries})..."
-                        )
-                        await asyncio.sleep(wait_time)
                         delay *= self.backoff_factor
                         continue
-
-                    if response.status_code in (401, 403):
-                        logger.warning(
-                            f"Access denied ({response.status_code}) for URL: {url}. Ensure adequate permissions."
-                        )
-
-                    return response
-
+                    return resp
                 except httpx.RequestError as exc:
                     retry_count += 1
                     if retry_count > self.max_retries:
@@ -158,31 +119,50 @@ class BlackboardClient:
             if close_needed:
                 await client.aclose()
 
+    def _get_course_id_candidates(self, course_id: str) -> List[str]:
+        course_id_str = str(course_id).strip()
+        if course_id_str in self._resolved_course_ids:
+            return [self._resolved_course_ids[course_id_str]]
+        if course_id_str.startswith("_") or course_id_str.startswith("courseId:"):
+            return [course_id_str]
+        if course_id_str.isdigit():
+            return [f"_{course_id_str}_1", f"courseId:{course_id_str}"]
+        return [f"courseId:{course_id_str}"]
+
     def _format_course_id(self, course_id: str) -> str:
-        if course_id.startswith("_") or course_id.startswith("courseId:"):
-            return course_id
-        return f"courseId:{course_id}"
+        candidates = self._get_course_id_candidates(course_id)
+        return candidates[0]
 
     async def get_course_details(self, course_id: str) -> Dict[str, Any]:
         """
         Retrieves basic details about a course.
         """
-        fmt_id = self._format_course_id(course_id)
-        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}"
-        resp = await self._request_with_retry("GET", url)
-        if resp.status_code == 200:
-            return resp.json()
+        candidates = self._get_course_id_candidates(course_id)
+        for fmt_id in candidates:
+            url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}"
+            resp = await self._request_with_retry("GET", url)
+            if resp.status_code == 200:
+                self._resolved_course_ids[str(course_id).strip()] = fmt_id
+                return resp.json()
         return {"id": course_id, "name": f"Course {course_id}", "courseId": course_id}
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
         """
         Recursively fetches the full content tree for a course.
         """
-        fmt_id = self._format_course_id(course_id)
-        top_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents"
-        resp = await self._request_with_retry("GET", top_url)
-        if resp.status_code != 200:
-            logger.error(f"Failed to fetch top-level contents for course {course_id} ({fmt_id}): {resp.status_code}")
+        candidates = self._get_course_id_candidates(course_id)
+        resp = None
+        used_fmt_id = None
+        for fmt_id in candidates:
+            top_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents"
+            resp = await self._request_with_retry("GET", top_url)
+            if resp.status_code == 200:
+                used_fmt_id = fmt_id
+                self._resolved_course_ids[str(course_id).strip()] = fmt_id
+                break
+
+        if not resp or resp.status_code != 200:
+            logger.error(f"Failed to fetch top-level contents for course {course_id}: {resp.status_code if resp else 'No response'}")
             return []
 
         data = resp.json()
@@ -196,11 +176,13 @@ class BlackboardClient:
         return tree
 
     async def get_content_detail(self, course_id: str, content_id: str) -> Dict[str, Any]:
-        fmt_id = self._format_course_id(course_id)
-        url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}"
-        resp = await self._request_with_retry("GET", url)
-        if resp.status_code == 200:
-            return resp.json()
+        candidates = self._get_course_id_candidates(course_id)
+        for fmt_id in candidates:
+            url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}"
+            resp = await self._request_with_retry("GET", url)
+            if resp.status_code == 200:
+                self._resolved_course_ids[str(course_id).strip()] = fmt_id
+                return resp.json()
         return {}
 
     async def _build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
