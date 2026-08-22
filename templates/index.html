@@ -266,6 +266,11 @@
                         progressPct.innerText = `${pct}%`;
                     }
 
+                    if (data.course_title && titleEl) {
+                        const cleanT = data.course_title.replace(/\s*-\s*Course Materials$/i, '').trim();
+                        titleEl.innerText = `${cleanT} - Course Materials`;
+                    }
+
                     if (data.message) {
                         logToTerminal(data.message);
                     }
@@ -338,9 +343,6 @@
                     }
                 }
                 if (courseIdEl) courseIdEl.innerText = clean;
-                if (titleEl && (titleEl.innerText.includes("Course Materials Extractor") || titleEl.innerText.startsWith("Course "))) {
-                    titleEl.innerText = `${clean} - Course Materials`;
-                }
             }
         });
     </script>

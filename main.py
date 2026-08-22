@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+import urllib.parse
 import uuid
 import logging
 from typing import Dict, Any, Optional
@@ -549,10 +551,11 @@ async def extract_course_stream(
                 try:
                     async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as bb_client:
                         await bb_client.authenticate()
-                        yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {course_id}...', 'status': 'running'})}\n\n"
-                        tree = await bb_client.get_contents_tree(course_id)
                         details = await bb_client.get_course_details(course_id)
-                        display_title = details.get("name") or display_title
+                        if details and details.get("name"):
+                            display_title = details["name"]
+                        tree = await bb_client.get_contents_tree(course_id)
+                        yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
                 except Exception as api_err:
                     err_msg = f"Blackboard REST API Auth Error ({api_err}). Check Application ID & Secret."
                     logger.error(err_msg, exc_info=True)
@@ -714,7 +717,7 @@ async def extract_course_stream(
             # Store zip archive in task storage
             task_storage[task_id] = {
                 "course_id": course_id,
-                "course_title": course_title,
+                "course_title": display_title,
                 "zip_bytes": zip_bytes,
                 "mode": mode,
             }
