@@ -128,8 +128,8 @@ class BlackboardClient:
         m = re.search(r'^\_?(\d+)(?:\_1)?$', course_id_str)
         if m:
             pk = m.group(1)
-            fmt = f"_{pk}_1"
-            return [fmt, f"courseId:{pk}", f"courseId:{course_id_str}"]
+            # Raw internal PKs must be passed directly (e.g., "_560_1") without prefixes
+            return [f"_{pk}_1"]
         
         if not course_id_str.startswith("_") and not course_id_str.startswith("courseId:"):
             return [f"_{course_id_str}_1", f"courseId:{course_id_str}"]
@@ -140,9 +140,6 @@ class BlackboardClient:
         return candidates[0]
 
     async def get_course_details(self, course_id: str) -> Dict[str, Any]:
-        """
-        Retrieves basic details about a course via Blackboard v3/v1 API.
-        """
         candidates = self._get_course_id_candidates(course_id)
         for fmt_id in candidates:
             for api_version in ["v3", "v1"]:
@@ -152,19 +149,24 @@ class BlackboardClient:
                 if resp.status_code == 200:
                     data = resp.json()
                     
-                    # Direct GET /courses/{id} returns a dict directly
+                    # Direct GET /courses/{id}
                     if isinstance(data, dict) and "courseId" in data:
+                        # Save internal ID for subsequent API calls
                         self._resolved_course_ids[str(course_id).strip()] = data.get("id", fmt_id)
                         return data
                     
-                    # Search/Filter endpoints return {"results": [...]}
-                    if isinstance(data, dict) and "results" in data and isinstance(data["results"], list) and len(data["results"]) > 0:
+                    # Search/Filter response {"results": [...]}
+                    if isinstance(data, dict) and "results" in data and len(data["results"]) > 0:
                         course_data = data["results"][0]
                         self._resolved_course_ids[str(course_id).strip()] = course_data.get("id", fmt_id)
                         return course_data
 
-        # Return empty or fallback only if all candidate requests fail (e.g. 404s)
-        return {"id": course_id, "name": f"Course {course_id}", "courseId": course_id}
+        # Direct fallback if requests fail
+        return {
+            "id": course_id, 
+            "name": f"Course {course_id}", 
+            "courseId": course_id
+        }
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
         """
