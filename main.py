@@ -20,6 +20,39 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url}: {exc}", exc_info=True)
+    return HTMLResponse(
+        content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>NTULearn Extractor Tool - Notice</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-slate-50 text-slate-800 flex items-center justify-center min-h-screen p-6">
+            <div class="max-w-lg w-full bg-white rounded-2xl shadow-xl p-8 border border-slate-200 text-center space-y-4">
+                <div class="w-16 h-16 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center mx-auto text-2xl font-bold">
+                    ⚠️
+                </div>
+                <h2 class="text-2xl font-extrabold text-slate-900">Application Notice</h2>
+                <p class="text-sm text-slate-600 leading-relaxed">
+                    The tool encountered an issue while processing this request: <br/>
+                    <code class="text-xs bg-slate-100 p-2 rounded text-amber-800 font-mono block mt-2 text-left overflow-x-auto">{str(exc)}</code>
+                </p>
+                <div class="pt-4 flex justify-center gap-3">
+                    <a href="/" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-2.5 rounded-xl transition-all shadow-md">
+                        Return to Extractor Dashboard
+                    </a>
+                </div>
+            </div>
+        </body>
+        </html>
+        """,
+        status_code=200,
+    )
+
 templates = Jinja2Templates(directory="templates")
 
 # In-memory session and zip archive storage
@@ -162,6 +195,8 @@ async def lti_login(request: Request):
 
     iss = params.get("iss")
     target_link_uri = params.get("target_link_uri") or str(request.url_for("lti_launch"))
+    if "onrender.com" in target_link_uri or request.headers.get("x-forwarded-proto") == "https":
+        target_link_uri = target_link_uri.replace("http://", "https://", 1)
     client_id = params.get("client_id")
     login_hint = params.get("login_hint")
 
