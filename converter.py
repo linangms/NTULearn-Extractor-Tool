@@ -476,6 +476,8 @@ class CourseMarkdownConverter:
                         m = re.search(r'href=["\']([^"\']+)["\']|src=["\']([^"\']+)["\']', body)
                         if m:
                             embed_url = m.group(1) or m.group(2) or ""
+                    if not embed_url and content_id:
+                        embed_url = f"https://ntulearn.ntu.edu.sg/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
 
                     if embed_url:
                         html_content = f"""<!DOCTYPE html>

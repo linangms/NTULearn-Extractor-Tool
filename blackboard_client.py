@@ -336,12 +336,12 @@ class BlackboardClient:
                 for e_match in re.finditer(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', body_html, re.I):
                     entry_id = e_match.group(1)
                     if not any(e[0] == entry_id for e in kaltura_entries):
-                        kaltura_entries.add((entry_id, f"https://cdnapisec.kaltura.com/p/0/sp/0/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"))
+                        kaltura_entries.add((entry_id, f"https://cdnapisec.kaltura.com/p/2342341/sp/234234100/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"))
 
                 for entry_id, orig_url in kaltura_entries:
                     idx += 1
                     p_match = re.search(r'/p/(\d+)', orig_url)
-                    partner_id = p_match.group(1) if p_match else "0"
+                    partner_id = p_match.group(1) if p_match else "2342341"
                     manifest_url = f"https://cdnapisec.kaltura.com/p/{partner_id}/sp/{partner_id}00/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"
 
                     attachments.append({
@@ -355,6 +355,47 @@ class BlackboardClient:
 
             except Exception as e:
                 logger.warning(f"Could not parse HTML embedded links/media for {content_id}: {e}")
+
+        # 4. Check handler / links for Kaltura / LTI placement items
+        handler_str = str(item.get("contentHandler", {})).lower()
+        is_kaltura_handler = "kaltura" in handler_str or "media" in handler_str or "blti" in handler_str or "video" in handler_str
+
+        for lk in item.get("links", []):
+            href = lk.get("href", "")
+            if href and any(k in href.lower() for k in ["kaltura", "osstream-kaltura", "launchlink", "blti", "panopto", "calt.ntu.edu.sg", "media.ntu.edu.sg"]):
+                full_lk_url = href if href.startswith("http") else f"{self.base_url}{href}"
+                e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', full_lk_url, re.I)
+                entry_id = e_match.group(1) if e_match else ""
+                
+                if not any(att.get("originalUrl") == full_lk_url or (entry_id and att.get("entryId") == entry_id) for att in attachments):
+                    if entry_id:
+                        manifest_url = f"https://cdnapisec.kaltura.com/p/2342341/sp/234234100/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"
+                        attachments.append({
+                            "id": manifest_url,
+                            "fileName": f"{title}.mp4",
+                            "downloadUrl": manifest_url,
+                            "originalUrl": full_lk_url,
+                            "isKaltura": True,
+                            "entryId": entry_id,
+                        })
+                    else:
+                        attachments.append({
+                            "id": full_lk_url,
+                            "fileName": f"{title}.mp4",
+                            "downloadUrl": full_lk_url,
+                            "originalUrl": full_lk_url,
+                            "isKaltura": True,
+                        })
+
+        if is_kaltura_handler and not attachments:
+            launch_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={course_id}&content_id={content_id}"
+            attachments.append({
+                "id": launch_url,
+                "fileName": f"{title}.mp4",
+                "downloadUrl": launch_url,
+                "originalUrl": launch_url,
+                "isKaltura": True,
+            })
 
         node["attachments"] = attachments
 
@@ -443,8 +484,34 @@ class BlackboardClient:
             fmt_id = self._format_course_id(course_id)
             url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/attachments/{attachment_id}/download"
             
-        resp = await self._request_with_retry("GET", url, follow_redirects=True)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://ntulearn.ntu.edu.sg/",
+        }
+        resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
         if resp.status_code == 200:
-            return resp.content
+            content = resp.content
+            # If response is HTML launch page, scan for embedded Kaltura entry_id or .mp4 URL
+            if content.startswith(b"<!DOCTYPE") or content.startswith(b"<html") or content.startswith(b"<?xml") or b"<iframe" in content:
+                try:
+                    html_text = resp.text
+                    e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', html_text, re.I)
+                    if e_match:
+                        found_entry_id = e_match.group(1)
+                        k_bytes = await self._try_download_kaltura_video(found_entry_id, url)
+                        if k_bytes:
+                            return k_bytes
+
+                    mp4_match = re.search(r'(https?://[^\s"\']+\.mp4(?:\?[^\s"\']*)?)', html_text, re.I)
+                    if mp4_match:
+                        mp4_url = mp4_match.group(1)
+                        mp4_resp = await self._request_with_retry("GET", mp4_url, headers=headers, follow_redirects=True)
+                        if mp4_resp.status_code == 200 and len(mp4_resp.content) > 10000:
+                            return mp4_resp.content
+                except Exception as e:
+                    logger.debug(f"Error parsing launch HTML page for video stream ({url}): {e}")
+
+            return content
+
         logger.error(f"Failed to download attachment {attachment_id} (URL: {url}): HTTP status {resp.status_code}")
         return None
