@@ -451,17 +451,23 @@ class BlackboardClient:
             for candidate_url in urls:
                 try:
                     resp = await self._request_with_retry("GET", candidate_url, headers=headers, follow_redirects=True)
-                    if resp.status_code == 200 and len(resp.content) > 10000 and not resp.content.startswith(b"<?xml") and not resp.content.startswith(b"<html"):
-                        logger.info(f"Successfully downloaded Kaltura video for {entry_id} ({len(resp.content)} bytes) via {candidate_url}")
-                        return resp.content
+                    if resp.status_code == 200 and len(resp.content) > 100000:
+                        snippet = resp.content[:64]
+                        if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
+                            if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
+                                logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({len(resp.content)} bytes) via {candidate_url}")
+                                return resp.content
                 except Exception as e:
                     logger.debug(f"Kaltura candidate URL failed ({candidate_url}): {e}")
 
         if orig_url and orig_url.startswith("http"):
             try:
                 resp = await self._request_with_retry("GET", orig_url, headers=headers, follow_redirects=True)
-                if resp.status_code == 200 and len(resp.content) > 10000 and not resp.content.startswith(b"<?xml") and not resp.content.startswith(b"<html"):
-                    return resp.content
+                if resp.status_code == 200 and len(resp.content) > 100000:
+                    snippet = resp.content[:64]
+                    if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
+                        if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
+                            return resp.content
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 

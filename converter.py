@@ -442,10 +442,23 @@ class CourseMarkdownConverter:
                             try:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
                                 if data and len(data) > 100:
-                                    zf.writestr(zip_target_path, data)
-                                    downloaded_any = True
-                                    if progress_callback:
-                                        await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                    lower_fn = filename.lower()
+                                    is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
+                                    
+                                    # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
+                                    valid_video = True
+                                    if is_video_file:
+                                        snippet = data[:64]
+                                        if len(data) < 50000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+                                            valid_video = False
+
+                                    if valid_video:
+                                        zf.writestr(zip_target_path, data)
+                                        downloaded_any = True
+                                        if progress_callback:
+                                            await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                    else:
+                                        logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
 
@@ -462,7 +475,7 @@ class CourseMarkdownConverter:
                 )
 
                 if is_kaltura_or_video:
-                    # Write interactive HTML video launcher & URL shortcut for Kaltura/video items
+                    # Write interactive HTML video launcher, URL shortcut & README for Kaltura/video items
                     embed_url = ""
                     for att in attachments:
                         if att.get("originalUrl"):
@@ -504,6 +517,16 @@ class CourseMarkdownConverter:
 </html>"""
                         zf.writestr(f"{current_dir}/{title}_Kaltura_Video.html", html_content)
                         zf.writestr(f"{current_dir}/{title}_Kaltura_Link.url", f"[InternetShortcut]\nURL={embed_url}\n")
+                        
+                        readme_txt = f"""Kaltura Video: {node.get('title')}
+
+Direct MP4 video file download is protected by NTU's Kaltura media server policies (requires active NTULearn login session).
+
+How to watch this video:
+1. Double-click '{title}_Kaltura_Video.html' to open and watch the embedded video in any web browser.
+2. Or double-click '{title}_Kaltura_Link.url' to open the original video directly on NTULearn.
+"""
+                        zf.writestr(f"{current_dir}/{title}_README.txt", readme_txt)
 
                 elif not downloaded_any:
                     # Fallback for general content items with no attachments: save body HTML if present
