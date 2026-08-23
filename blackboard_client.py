@@ -388,7 +388,8 @@ class BlackboardClient:
                         })
 
         if is_kaltura_handler and not attachments:
-            launch_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={course_id}&content_id={content_id}"
+            fmt_id = self._format_course_id(course_id)
+            launch_url = f"{self.base_url}/webapps/blackboard/execute/blti/launchLink?course_id={fmt_id}&content_id={content_id}&from_ultra=true"
             attachments.append({
                 "id": launch_url,
                 "fileName": f"{title}.mp4",
