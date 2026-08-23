@@ -457,6 +457,21 @@ class CourseMarkdownConverter:
                                         downloaded_any = True
                                         if progress_callback:
                                             await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+
+                                        # If attachment is an SRT or VTT subtitle file, convert to plain text .txt transcript!
+                                        if any(lower_fn.endswith(ext) for ext in [".srt", ".vtt"]):
+                                            try:
+                                                raw_text = data.decode("utf-8", errors="ignore")
+                                                clean_txt = clean_vtt_srt_transcript(raw_text)
+                                                if clean_txt and clean_txt.strip():
+                                                    clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                                    txt_filename = f"{clean_node_title}_transcript.txt"
+                                                    txt_target_path = f"{current_dir}/{txt_filename}"
+                                                    zf.writestr(txt_target_path, clean_txt)
+                                                    if progress_callback:
+                                                        await progress_callback(f"Converted subtitle: {txt_filename}", pct)
+                                            except Exception as e:
+                                                logger.warning(f"Could not convert subtitle {filename} to TXT: {e}")
                                     else:
                                         logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
                             except Exception as e:
