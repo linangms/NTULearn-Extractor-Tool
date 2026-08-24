@@ -451,7 +451,7 @@ class BlackboardClient:
             for candidate_url in urls:
                 try:
                     resp = await self._request_with_retry("GET", candidate_url, headers=headers, follow_redirects=True)
-                    if resp.status_code == 200 and len(resp.content) > 100000:
+                    if resp.status_code == 200 and len(resp.content) > 1000:
                         snippet = resp.content[:64]
                         if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
                             if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
@@ -463,7 +463,7 @@ class BlackboardClient:
         if orig_url and orig_url.startswith("http"):
             try:
                 resp = await self._request_with_retry("GET", orig_url, headers=headers, follow_redirects=True)
-                if resp.status_code == 200 and len(resp.content) > 100000:
+                if resp.status_code == 200 and len(resp.content) > 1000:
                     snippet = resp.content[:64]
                     if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
                         if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):

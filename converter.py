@@ -449,7 +449,9 @@ class CourseMarkdownConverter:
                                     valid_video = True
                                     if is_video_file:
                                         snippet = data[:64]
-                                        if len(data) < 50000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+                                        if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+                                            valid_video = False
+                                        elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
                                             valid_video = False
 
                                     if valid_video:
