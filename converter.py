@@ -443,39 +443,50 @@ class CourseMarkdownConverter:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
                                 if data and len(data) > 100:
                                     lower_fn = filename.lower()
-                                    is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
-                                    
-                                    # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
-                                    valid_video = True
-                                    if is_video_file:
-                                        snippet = data[:64]
-                                        if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
-                                            valid_video = False
-                                        elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
-                                            valid_video = False
+                                    is_caption_data = (
+                                        data.startswith(b"WEBVTT")
+                                        or b"-->" in data[:500]
+                                        or lower_fn.endswith(".srt")
+                                        or lower_fn.endswith(".vtt")
+                                    )
 
-                                    if valid_video:
-                                        zf.writestr(zip_target_path, data)
+                                    if is_caption_data:
+                                        # Save both raw .srt / .vtt subtitle file AND converted plain text .txt transcript!
+                                        sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
+                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                        sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
+                                        zf.writestr(f"{current_dir}/{sub_filename}", data)
                                         downloaded_any = True
-                                        if progress_callback:
-                                            await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
 
-                                        # If attachment is an SRT or VTT subtitle file, convert to plain text .txt transcript!
-                                        if any(lower_fn.endswith(ext) for ext in [".srt", ".vtt"]):
-                                            try:
-                                                raw_text = data.decode("utf-8", errors="ignore")
-                                                clean_txt = clean_vtt_srt_transcript(raw_text)
-                                                if clean_txt and clean_txt.strip():
-                                                    clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                                    txt_filename = f"{clean_node_title}_transcript.txt"
-                                                    txt_target_path = f"{current_dir}/{txt_filename}"
-                                                    zf.writestr(txt_target_path, clean_txt)
-                                                    if progress_callback:
-                                                        await progress_callback(f"Converted subtitle: {txt_filename}", pct)
-                                            except Exception as e:
-                                                logger.warning(f"Could not convert subtitle {filename} to TXT: {e}")
+                                        try:
+                                            raw_text = data.decode("utf-8", errors="ignore")
+                                            clean_txt = clean_vtt_srt_transcript(raw_text)
+                                            if clean_txt and clean_txt.strip():
+                                                txt_filename = f"{clean_node_title}_transcript.txt"
+                                                zf.writestr(f"{current_dir}/{txt_filename}", clean_txt)
+                                                if progress_callback:
+                                                    await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                                        except Exception as e:
+                                            logger.warning(f"Could not convert subtitle {filename} to TXT: {e}")
                                     else:
-                                        logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
+                                        is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
+                                        
+                                        # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
+                                        valid_video = True
+                                        if is_video_file:
+                                            snippet = data[:64]
+                                            if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+                                                valid_video = False
+                                            elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
+                                                valid_video = False
+
+                                        if valid_video:
+                                            zf.writestr(zip_target_path, data)
+                                            downloaded_any = True
+                                            if progress_callback:
+                                                await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                        else:
+                                            logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
 
