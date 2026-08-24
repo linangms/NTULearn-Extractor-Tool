@@ -479,8 +479,8 @@ class BlackboardClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://ntulearn.ntu.edu.sg/",
         }
-        for partner_id in ["2342341", "2092301", "102", "103"]:
-            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?entryId={entry_id}&partnerId={partner_id}&format=1"
+        for partner_id in ["2342341", "2092301", "102", "103", "0"]:
+            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?filter:entryIdEqual={entry_id}&partnerId={partner_id}&format=1"
             try:
                 resp = await self._request_with_retry("GET", api_url, headers=headers, follow_redirects=True)
                 if resp.status_code == 200:

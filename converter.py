@@ -545,12 +545,25 @@ How to watch this video:
 """
                         zf.writestr(f"{current_dir}/{title}_README.txt", readme_txt)
 
-                    # Always write dedicated {title}_transcript.txt if item description/instructions text exists
+                    # Always write dedicated {title}_transcript.txt for video items
+                    clean_node_title = sanitize_filename(node.get("title", "Video"))
+                    txt_filename = f"{clean_node_title}_transcript.txt"
+                    txt_target_path = f"{current_dir}/{txt_filename}"
+
                     clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
                     if clean_body_text and len(clean_body_text) > 10:
-                        clean_node_title = sanitize_filename(node.get("title", "Video"))
-                        txt_filename = f"{clean_node_title}_transcript.txt"
-                        zf.writestr(f"{current_dir}/{txt_filename}", clean_body_text)
+                        zf.writestr(txt_target_path, clean_body_text)
+                    else:
+                        no_transcript_msg = f"""Title: {node.get('title')}
+Course ID: {self.course_id}
+
+Transcript Status: No subtitle/caption transcript file (.srt / .vtt) or text transcript was attached for this video by the instructor on NTULearn.
+
+To watch the video with player controls in your browser:
+1. Double-click '{title}_Kaltura_Video.html' to open and play the video.
+2. Or double-click '{title}_Kaltura_Link.url' to view it directly on NTULearn.
+"""
+                        zf.writestr(txt_target_path, no_transcript_msg)
 
                 elif not downloaded_any:
                     # Fallback for general content items with no attachments: save body HTML if present
