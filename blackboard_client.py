@@ -471,6 +471,30 @@ class BlackboardClient:
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 
+    async def _try_download_kaltura_captions(self, entry_id: str) -> Optional[bytes]:
+        """
+        Queries Kaltura caption assets API for any attached closed captions/subtitles (.vtt / .srt) and downloads them.
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://ntulearn.ntu.edu.sg/",
+        }
+        for partner_id in ["2342341", "2092301", "102", "103"]:
+            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?entryId={entry_id}&partnerId={partner_id}&format=1"
+            try:
+                resp = await self._request_with_retry("GET", api_url, headers=headers, follow_redirects=True)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    objects = data.get("objects", []) if isinstance(data, dict) else []
+                    for obj in objects:
+                        caption_id = obj.get("id")
+                        if caption_id:
+                            serve_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}"
+                            cap_resp = await self._request_with_retry("GET", serve_url, headers=headers, follow_redirects=True)
+                            if cap_resp.status_code == 200 and len(cap_resp.content) > 10:
+                                return cap_resp.content
+            except Exception as e:
+                logger.debug(f"Could not fetch Kaltura captions for {entry_id} via partner {partner_id}: {e}")
         return None
 
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
@@ -482,6 +506,9 @@ class BlackboardClient:
                 k_bytes = await self._try_download_kaltura_video(entry_id, attachment_id)
                 if k_bytes:
                     return k_bytes
+                cap_bytes = await self._try_download_kaltura_captions(entry_id)
+                if cap_bytes:
+                    return cap_bytes
 
         if attachment_id.startswith("http"):
             url = attachment_id

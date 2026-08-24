@@ -545,6 +545,13 @@ How to watch this video:
 """
                         zf.writestr(f"{current_dir}/{title}_README.txt", readme_txt)
 
+                    # Always write dedicated {title}_transcript.txt if item description/instructions text exists
+                    clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
+                    if clean_body_text and len(clean_body_text) > 10:
+                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                        txt_filename = f"{clean_node_title}_transcript.txt"
+                        zf.writestr(f"{current_dir}/{txt_filename}", clean_body_text)
+
                 elif not downloaded_any:
                     # Fallback for general content items with no attachments: save body HTML if present
                     if body and body.strip():
