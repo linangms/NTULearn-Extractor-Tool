@@ -489,10 +489,19 @@ class BlackboardClient:
                     for obj in objects:
                         caption_id = obj.get("id")
                         if caption_id:
-                            serve_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}"
-                            cap_resp = await self._request_with_retry("GET", serve_url, headers=headers, follow_redirects=True)
-                            if cap_resp.status_code == 200 and len(cap_resp.content) > 10:
-                                return cap_resp.content
+                            serve_urls = [
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}",
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/servewebvtt/captionAssetId/{caption_id}",
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/exportToSrt/id/{caption_id}",
+                            ]
+                            for serve_url in serve_urls:
+                                try:
+                                    cap_resp = await self._request_with_retry("GET", serve_url, headers=headers, follow_redirects=True)
+                                    if cap_resp.status_code == 200 and len(cap_resp.content) > 10:
+                                        if not cap_resp.content.startswith(b"<") and not cap_resp.content.startswith(b"{"):
+                                            return cap_resp.content
+                                except Exception as e:
+                                    logger.debug(f"Kaltura serve caption URL failed ({serve_url}): {e}")
             except Exception as e:
                 logger.debug(f"Could not fetch Kaltura captions for {entry_id} via partner {partner_id}: {e}")
         return None
