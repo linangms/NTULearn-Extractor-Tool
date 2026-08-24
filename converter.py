@@ -551,13 +551,19 @@ How to watch this video:
                     txt_target_path = f"{current_dir}/{txt_filename}"
 
                     clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
-                    if clean_body_text and len(clean_body_text) > 10:
+                    is_readme_text = any(phrase in clean_body_text for phrase in [
+                        "Direct MP4 video file download is protected by",
+                        "How to watch this video",
+                        "Kaltura Video:",
+                    ])
+
+                    if clean_body_text and len(clean_body_text) > 10 and not is_readme_text:
                         zf.writestr(txt_target_path, clean_body_text)
                     else:
                         no_transcript_msg = f"""Title: {node.get('title')}
 Course ID: {self.course_id}
 
-Transcript Status: No subtitle/caption transcript file (.srt / .vtt) or text transcript was attached for this video by the instructor on NTULearn.
+Transcript Status: No .srt or .vtt subtitle file was uploaded or attached for this video by the instructor on NTULearn.
 
 To watch the video with player controls in your browser:
 1. Double-click '{title}_Kaltura_Video.html' to open and play the video.
