@@ -62,7 +62,7 @@ sessions: Dict[str, Dict[str, Any]] = {}
 task_storage: Dict[str, Dict[str, Any]] = {}
 
 # Default Blackboard REST API configuration (can be overriden by env vars)
-BLACKBOARD_BASE_URL = "https://ntulearn.ntu.edu.sg"
+BLACKBOARD_BASE_URL = os.environ.get("BLACKBOARD_BASE_URL", "https://ntulearntst.ntu.edu.sg")
 
 
 async def extract_lti_context(request: Request) -> Dict[str, str]:

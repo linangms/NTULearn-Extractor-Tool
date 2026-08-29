@@ -126,7 +126,7 @@ class CourseMarkdownConverter:
     rewrites links, and builds a downloadable ZIP file structure.
     """
 
-    def __init__(self, course_name: str, course_id: str, base_url: str = "https://ntulearn.ntu.edu.sg"):
+    def __init__(self, course_name: str, course_id: str, base_url: str = "https://ntulearntst.ntu.edu.sg"):
         self.course_name = course_name or course_id or "Course Materials"
         self.course_id = course_id
         self.base_url = base_url.rstrip("/")
