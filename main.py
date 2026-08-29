@@ -747,7 +747,7 @@ async def extract_course_stream(
                     return f"Simulated attachment binary content for {att_id}".encode("utf-8")
                 downloader_func = mock_downloader
 
-            converter = CourseMarkdownConverter(course_title, course_id)
+            converter = CourseMarkdownConverter(course_title, course_id, base_url=bb_base_url)
             progress_queue = asyncio.Queue()
 
             async def progress_cb(msg: str, pct: float):

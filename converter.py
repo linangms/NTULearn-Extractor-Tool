@@ -126,9 +126,10 @@ class CourseMarkdownConverter:
     rewrites links, and builds a downloadable ZIP file structure.
     """
 
-    def __init__(self, course_name: str, course_id: str):
+    def __init__(self, course_name: str, course_id: str, base_url: str = "https://ntulearn.ntu.edu.sg"):
         self.course_name = course_name or course_id or "Course Materials"
         self.course_id = course_id
+        self.base_url = base_url.rstrip("/")
         clean_name = re.sub(r'\s*-\s*Course Materials$', '', self.course_name, flags=re.IGNORECASE).strip()
         self.clean_course_name = clean_name or self.course_name
         self.root_folder_name = sanitize_filename(f"{self.clean_course_name}_Markdown")
@@ -518,7 +519,7 @@ class CourseMarkdownConverter:
                         if m:
                             embed_url = m.group(1) or m.group(2) or ""
                     if not embed_url and content_id:
-                        embed_url = f"https://ntulearn.ntu.edu.sg/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
+                        embed_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
 
                     if embed_url:
                         html_content = f"""<!DOCTYPE html>
