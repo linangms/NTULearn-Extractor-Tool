@@ -471,16 +471,38 @@ class BlackboardClient:
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 
+    async def _get_kaltura_ks_token(self, partner_id: str = "2342341") -> Optional[str]:
+        """
+        Obtains an authenticated Kaltura Session (ks) token for the user/session.
+        """
+        session_url = "https://cdnapisec.kaltura.com/api_v3/service/session/action/startWidgetSession?format=1"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": f"{self.base_url}/",
+        }
+        body = {"widgetId": f"_{partner_id}"}
+        try:
+            resp = await self._request_with_retry("POST", session_url, json=body, headers=headers, follow_redirects=True)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("ks"):
+                    return data["ks"]
+        except Exception as e:
+            logger.debug(f"Failed to start Kaltura widget session for partner {partner_id}: {e}")
+        return None
+
     async def _try_download_kaltura_captions(self, entry_id: str) -> Optional[bytes]:
         """
-        Queries Kaltura caption assets API for any attached closed captions/subtitles (.vtt / .srt) and downloads them.
+        Queries Kaltura caption assets API using authenticated session token (ks) for attached closed captions/subtitles (.vtt / .srt) and downloads them.
         """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": f"{self.base_url}/",
         }
         for partner_id in ["2342341", "2092301", "102", "103", "0"]:
-            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?filter:entryIdEqual={entry_id}&partnerId={partner_id}&format=1"
+            ks = await self._get_kaltura_ks_token(partner_id)
+            ks_param = f"&ks={ks}" if ks else ""
+            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?filter:entryIdEqual={entry_id}&partnerId={partner_id}{ks_param}&format=1"
             try:
                 resp = await self._request_with_retry("GET", api_url, headers=headers, follow_redirects=True)
                 if resp.status_code == 200:
@@ -490,9 +512,9 @@ class BlackboardClient:
                         caption_id = obj.get("id")
                         if caption_id:
                             serve_urls = [
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}",
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/servewebvtt/captionAssetId/{caption_id}",
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/exportToSrt/id/{caption_id}",
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/servewebvtt/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
+                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/exportToSrt/id/{caption_id}?partnerId={partner_id}{ks_param}",
                             ]
                             for serve_url in serve_urls:
                                 try:
