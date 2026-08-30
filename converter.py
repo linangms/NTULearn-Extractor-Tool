@@ -507,17 +507,21 @@ class CourseMarkdownConverter:
                     # Write interactive HTML video launcher, URL shortcut & README for Kaltura/video items
                     embed_url = ""
                     for att in attachments:
-                        if att.get("originalUrl"):
-                            embed_url = att.get("originalUrl")
+                        orig = att.get("originalUrl") or ""
+                        dl = att.get("downloadUrl") or ""
+                        if orig and "playManifest" not in orig and "cdnapisec.kaltura.com" not in orig:
+                            embed_url = orig
                             break
-                        elif att.get("downloadUrl"):
-                            embed_url = att.get("downloadUrl")
+                        elif dl and "playManifest" not in dl and "cdnapisec.kaltura.com" not in dl:
+                            embed_url = dl
                             break
                     if not embed_url:
                         import re
                         m = re.search(r'href=["\']([^"\']+)["\']|src=["\']([^"\']+)["\']', body)
                         if m:
-                            embed_url = m.group(1) or m.group(2) or ""
+                            cand = m.group(1) or m.group(2) or ""
+                            if cand and "playManifest" not in cand and "cdnapisec.kaltura.com" not in cand:
+                                embed_url = cand
                     if not embed_url and content_id:
                         embed_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
 
