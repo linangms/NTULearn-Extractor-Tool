@@ -297,6 +297,7 @@ class CourseMarkdownConverter:
         attachments_dir: str,
         zf: zipfile.ZipFile,
         downloader: Optional[Callable],
+        current_dir: Optional[str] = None,
     ) -> Tuple[Dict[str, str], Dict[str, str]]:
         mapping = {}
         doc_text_map = {}
@@ -322,17 +323,30 @@ class CourseMarkdownConverter:
                         if data:
                             zf.writestr(zip_target_path, data)
                             extracted_text = extract_text_from_file_bytes(data, filename)
-                            if extracted_text and extracted_text.strip():
-                                doc_text_map[filename] = extracted_text
+                            lower_fn = filename.lower()
+                            is_caption_data = (
+                                data.startswith(b"WEBVTT")
+                                or b"-->" in data[:500]
+                                or lower_fn.endswith(".srt")
+                                or lower_fn.endswith(".vtt")
+                            )
 
-                                # If this attachment is a VTT / SRT subtitle file, also save a dedicated .txt transcript file!
-                                lower_fn = filename.lower()
-                                if any(lower_fn.endswith(ext) for ext in [".vtt", ".srt"]):
-                                    clean_node_title = sanitize_filename(node.get("title", "Video"))
+                            if is_caption_data:
+                                clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
+                                target_dir = current_dir or self.root_folder_name
+
+                                # 1. Save raw subtitle file (.srt / .vtt)
+                                sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
+                                zf.writestr(f"{target_dir}/{sub_filename}", data)
+
+                                # 2. Save converted plain text transcript (.txt)
+                                if extracted_text and extracted_text.strip():
                                     txt_filename = f"{clean_node_title}_transcript.txt"
-                                    txt_target_path = f"{self.root_folder_name}/{txt_filename}"
-                                    zf.writestr(txt_target_path, extracted_text)
+                                    zf.writestr(f"{target_dir}/{txt_filename}", extracted_text)
                                     doc_text_map[txt_filename] = extracted_text
+                            elif extracted_text and extracted_text.strip():
+                                doc_text_map[filename] = extracted_text
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
 
