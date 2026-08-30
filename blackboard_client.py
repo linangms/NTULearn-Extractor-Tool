@@ -528,11 +528,25 @@ class BlackboardClient:
                 logger.debug(f"Could not fetch Kaltura captions for {entry_id} via partner {partner_id}: {e}")
         return None
 
+    def _extract_kaltura_entry_id(self, text: str) -> Optional[str]:
+        import re
+        e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', text, re.I)
+        return e_match.group(1) if e_match else None
+
+    async def download_kaltura_caption_bytes(self, attachment_id: str) -> Optional[bytes]:
+        """
+        Fetches the real .srt/.vtt caption asset for a Kaltura video attachment,
+        independent of whether the video itself downloads successfully.
+        """
+        entry_id = self._extract_kaltura_entry_id(attachment_id)
+        if not entry_id:
+            return None
+        return await self._try_download_kaltura_captions(entry_id)
+
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
         import re
         if "kaltura" in attachment_id.lower() or re.search(r'\b([01]_[a-zA-Z0-9]{8,12})\b', attachment_id):
-            e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', attachment_id, re.I)
-            entry_id = e_match.group(1) if e_match else ""
+            entry_id = self._extract_kaltura_entry_id(attachment_id)
             if entry_id:
                 k_bytes = await self._try_download_kaltura_video(entry_id, attachment_id)
                 if k_bytes:

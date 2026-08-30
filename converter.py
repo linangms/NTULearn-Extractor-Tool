@@ -9,6 +9,17 @@ import markdownify
 
 logger = logging.getLogger("converter")
 
+def _looks_like_kaltura_attachment(attachment_id: str, att: Dict[str, Any]) -> bool:
+    """
+    Cheap local check so we only ask the caption_downloader to hit Kaltura's API
+    for attachments that are actually Kaltura video entries.
+    """
+    if att.get("isKaltura"):
+        return True
+    text = attachment_id or ""
+    return "kaltura" in text.lower() or bool(re.search(r'\b[01]_[a-zA-Z0-9]{8,12}\b', text))
+
+
 def sanitize_filename(name: str) -> str:
     """
     Sanitizes string for cross-platform safe file and folder names.
@@ -193,6 +204,7 @@ class CourseMarkdownConverter:
         self,
         content_tree: List[Dict[str, Any]],
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
     ) -> bytes:
         """
@@ -231,7 +243,7 @@ class CourseMarkdownConverter:
 
                 attachments_dir = f"{out_folder}/attachments"
                 attachment_map, doc_text_map = await self._handle_attachments(
-                    item, attachments_dir, zf, attachment_downloader
+                    item, attachments_dir, zf, attachment_downloader, caption_downloader=caption_downloader
                 )
 
                 body = (
@@ -298,6 +310,7 @@ class CourseMarkdownConverter:
         zf: zipfile.ZipFile,
         downloader: Optional[Callable],
         current_dir: Optional[str] = None,
+        caption_downloader: Optional[Callable] = None,
     ) -> Tuple[Dict[str, str], Dict[str, str]]:
         mapping = {}
         doc_text_map = {}
@@ -332,25 +345,57 @@ class CourseMarkdownConverter:
                             )
 
                             if is_caption_data:
-                                clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
-                                target_dir = current_dir or self.root_folder_name
-
-                                # 1. Save raw subtitle file (.srt / .vtt)
-                                sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
-                                zf.writestr(f"{target_dir}/{sub_filename}", data)
-
-                                # 2. Save converted plain text transcript (.txt)
+                                self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir, doc_text_map)
+                            else:
                                 if extracted_text and extracted_text.strip():
-                                    txt_filename = f"{clean_node_title}_transcript.txt"
-                                    zf.writestr(f"{target_dir}/{txt_filename}", extracted_text)
-                                    doc_text_map[txt_filename] = extracted_text
-                            elif extracted_text and extracted_text.strip():
-                                doc_text_map[filename] = extracted_text
+                                    doc_text_map[filename] = extracted_text
+
+                                # This attachment was the video itself (or another file) -
+                                # a Kaltura video's captions live as a separate asset, so
+                                # fetch them independently rather than only as a fallback
+                                # for when the video download fails.
+                                if caption_downloader and _looks_like_kaltura_attachment(download_key, att):
+                                    try:
+                                        cap_data = await caption_downloader(self.course_id, content_id, download_key)
+                                        if cap_data:
+                                            self._save_caption_and_transcript(
+                                                node, cap_data, "captions.srt", zf, current_dir, doc_text_map
+                                            )
+                                    except Exception as e:
+                                        logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
 
         return mapping, doc_text_map
+
+    def _save_caption_and_transcript(
+        self,
+        node: Dict[str, Any],
+        data: bytes,
+        lower_fn: str,
+        zf: zipfile.ZipFile,
+        current_dir: Optional[str],
+        doc_text_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Saves a raw .srt/.vtt subtitle file plus its cleaned plain-text transcript.
+        """
+        clean_node_title = sanitize_filename(node.get("title", "Video"))
+        sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
+        target_dir = current_dir or self.root_folder_name
+
+        # 1. Save raw subtitle file (.srt / .vtt)
+        sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
+        zf.writestr(f"{target_dir}/{sub_filename}", data)
+
+        # 2. Save converted plain text transcript (.txt)
+        raw_text = data.decode("utf-8", errors="ignore")
+        clean_txt = clean_vtt_srt_transcript(raw_text)
+        if clean_txt and clean_txt.strip():
+            txt_filename = f"{clean_node_title}_transcript.txt"
+            zf.writestr(f"{target_dir}/{txt_filename}", clean_txt)
+            if doc_text_map is not None:
+                doc_text_map[txt_filename] = clean_txt
 
     def _count_nodes(self, nodes: List[Dict[str, Any]]) -> int:
         count = 0
@@ -364,6 +409,7 @@ class CourseMarkdownConverter:
         self,
         content_tree: List[Dict[str, Any]],
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
     ) -> bytes:
         """
@@ -381,6 +427,7 @@ class CourseMarkdownConverter:
                 current_dir=root_dir,
                 zf=zf,
                 attachment_downloader=attachment_downloader,
+                caption_downloader=caption_downloader,
                 progress_callback=progress_callback,
                 processed_count=[0],
                 total_nodes=total_nodes,
@@ -398,6 +445,7 @@ class CourseMarkdownConverter:
         progress_callback: Optional[Callable],
         processed_count: List[int],
         total_nodes: int,
+        caption_downloader: Optional[Callable] = None,
     ):
         for node in nodes:
             processed_count[0] += 1
@@ -441,10 +489,12 @@ class CourseMarkdownConverter:
                         progress_callback=progress_callback,
                         processed_count=processed_count,
                         total_nodes=total_nodes,
+                        caption_downloader=caption_downloader,
                     )
             else:
                 # Raw attachments placed directly into current_dir
                 downloaded_any = False
+                real_transcript_saved = False
                 if attachments:
                     for att in attachments:
                         att_id = att.get("downloadUrl") or att.get("id")
@@ -467,25 +517,15 @@ class CourseMarkdownConverter:
 
                                     if is_caption_data:
                                         # Save both raw .srt / .vtt subtitle file AND converted plain text .txt transcript!
-                                        sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
-                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                        sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
-                                        zf.writestr(f"{current_dir}/{sub_filename}", data)
+                                        self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir)
                                         downloaded_any = True
-
-                                        try:
-                                            raw_text = data.decode("utf-8", errors="ignore")
-                                            clean_txt = clean_vtt_srt_transcript(raw_text)
-                                            if clean_txt and clean_txt.strip():
-                                                txt_filename = f"{clean_node_title}_transcript.txt"
-                                                zf.writestr(f"{current_dir}/{txt_filename}", clean_txt)
-                                                if progress_callback:
-                                                    await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
-                                        except Exception as e:
-                                            logger.warning(f"Could not convert subtitle {filename} to TXT: {e}")
+                                        real_transcript_saved = True
+                                        if progress_callback:
+                                            clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                            await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
                                     else:
                                         is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
-                                        
+
                                         # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
                                         valid_video = True
                                         if is_video_file:
@@ -500,7 +540,23 @@ class CourseMarkdownConverter:
                                             downloaded_any = True
                                             if progress_callback:
                                                 await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
-                                        else:
+
+                                        # The Kaltura caption/subtitle asset is separate from the video
+                                        # asset itself, so fetch it independently rather than only as a
+                                        # fallback for when the video download fails.
+                                        if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(att_id, att):
+                                            try:
+                                                cap_data = await caption_downloader(self.course_id, content_id, att_id)
+                                                if cap_data:
+                                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir)
+                                                    real_transcript_saved = True
+                                                    if progress_callback:
+                                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                                            except Exception as e:
+                                                logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
+
+                                        if not valid_video:
                                             logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
@@ -583,22 +639,24 @@ How to watch this video:
 """
                         zf.writestr(f"{current_dir}/{title}_README.txt", readme_txt)
 
-                    # Always write dedicated {title}_transcript.txt for video items
-                    clean_node_title = sanitize_filename(node.get("title", "Video"))
-                    txt_filename = f"{clean_node_title}_transcript.txt"
-                    txt_target_path = f"{current_dir}/{txt_filename}"
+                    # If a real .srt/.vtt caption was already fetched above, don't clobber
+                    # it with the description text or the "no transcript" placeholder.
+                    if not real_transcript_saved:
+                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                        txt_filename = f"{clean_node_title}_transcript.txt"
+                        txt_target_path = f"{current_dir}/{txt_filename}"
 
-                    clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
-                    is_readme_text = any(phrase in clean_body_text for phrase in [
-                        "Direct MP4 video file download is protected by",
-                        "How to watch this video",
-                        "Kaltura Video:",
-                    ])
+                        clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
+                        is_readme_text = any(phrase in clean_body_text for phrase in [
+                            "Direct MP4 video file download is protected by",
+                            "How to watch this video",
+                            "Kaltura Video:",
+                        ])
 
-                    if clean_body_text and len(clean_body_text) > 10 and not is_readme_text:
-                        zf.writestr(txt_target_path, clean_body_text)
-                    else:
-                        no_transcript_msg = f"""Title: {node.get('title')}
+                        if clean_body_text and len(clean_body_text) > 10 and not is_readme_text:
+                            zf.writestr(txt_target_path, clean_body_text)
+                        else:
+                            no_transcript_msg = f"""Title: {node.get('title')}
 Course ID: {self.course_id}
 
 Transcript Status: No .srt or .vtt subtitle file was uploaded or attached for this video by the instructor on NTULearn.
@@ -607,7 +665,7 @@ To watch the video with player controls in your browser:
 1. Double-click '{title}_Kaltura_Video.html' to open and play the video.
 2. Or double-click '{title}_Kaltura_Link.url' to view it directly on NTULearn.
 """
-                        zf.writestr(txt_target_path, no_transcript_msg)
+                            zf.writestr(txt_target_path, no_transcript_msg)
 
                 elif not downloaded_any:
                     # Fallback for general content items with no attachments: save body HTML if present
