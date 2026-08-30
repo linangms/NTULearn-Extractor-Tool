@@ -265,15 +265,32 @@ class CourseMarkdownConverter:
                     or any(ext in body.lower() for ext in [".mp4", ".mov", ".m4v", ".webm"])
                 )
 
-                # If this is a video item with description/transcript text, write a dedicated .txt transcript file!
+                # If this is a video item, try to fetch its real Kaltura captions first;
+                # only fall back to the description text as a transcript if none exist.
                 if is_video_item:
                     clean_item_title = sanitize_filename(item.get("title", "Video"))
                     txt_filename = f"{clean_item_title}_transcript.txt"
                     if txt_filename not in doc_text_map:
-                        clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
-                        if clean_body_text and len(clean_body_text) > 10:
-                            zf.writestr(f"{out_folder}/{txt_filename}", clean_body_text)
-                            doc_text_map[txt_filename] = clean_body_text
+                        real_transcript_saved = False
+                        if caption_downloader:
+                            search_text = body + " " + " ".join(
+                                f"{att.get('originalUrl') or ''} {att.get('downloadUrl') or ''}"
+                                for att in item.get("attachments", [])
+                            )
+                            if _looks_like_kaltura_attachment(search_text, {}):
+                                try:
+                                    cap_data = await caption_downloader(self.course_id, item.get("id"), search_text)
+                                    if cap_data:
+                                        self._save_caption_and_transcript(item, cap_data, "captions.srt", zf, out_folder, doc_text_map)
+                                        real_transcript_saved = True
+                                except Exception as e:
+                                    logger.warning(f"Failed to fetch Kaltura captions for {clean_item_title}: {e}")
+
+                        if not real_transcript_saved:
+                            clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
+                            if clean_body_text and len(clean_body_text) > 10:
+                                zf.writestr(f"{out_folder}/{txt_filename}", clean_body_text)
+                                doc_text_map[txt_filename] = clean_body_text
 
                 md_text = self.convert_html_to_markdown(body, attachment_map)
 
@@ -602,6 +619,24 @@ class CourseMarkdownConverter:
 
                     if not embed_url and content_id:
                         embed_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
+
+                    # Kaltura video items are often embedded via body HTML with no
+                    # separate downloadable "attachment" entry, so the per-attachment
+                    # caption fetch above never runs for them. Try again here using
+                    # whatever Kaltura entry id can be found in the embed URL or body.
+                    if caption_downloader and not real_transcript_saved:
+                        search_text = f"{embed_url} {body}"
+                        if _looks_like_kaltura_attachment(search_text, {}):
+                            try:
+                                cap_data = await caption_downloader(self.course_id, content_id, search_text)
+                                if cap_data:
+                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir)
+                                    real_transcript_saved = True
+                                    if progress_callback:
+                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch Kaltura captions for {title}: {e}")
 
                     if embed_url:
                         html_content = f"""<!DOCTYPE html>
