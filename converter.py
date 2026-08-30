@@ -427,6 +427,7 @@ class CourseMarkdownConverter:
         content_tree: List[Dict[str, Any]],
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
         caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        embed_url_resolver: Optional[Callable[[str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
     ) -> bytes:
         """
@@ -445,6 +446,7 @@ class CourseMarkdownConverter:
                 zf=zf,
                 attachment_downloader=attachment_downloader,
                 caption_downloader=caption_downloader,
+                embed_url_resolver=embed_url_resolver,
                 progress_callback=progress_callback,
                 processed_count=[0],
                 total_nodes=total_nodes,
@@ -463,6 +465,7 @@ class CourseMarkdownConverter:
         processed_count: List[int],
         total_nodes: int,
         caption_downloader: Optional[Callable] = None,
+        embed_url_resolver: Optional[Callable] = None,
     ):
         for node in nodes:
             processed_count[0] += 1
@@ -507,6 +510,7 @@ class CourseMarkdownConverter:
                         processed_count=processed_count,
                         total_nodes=total_nodes,
                         caption_downloader=caption_downloader,
+                        embed_url_resolver=embed_url_resolver,
                     )
             else:
                 # Raw attachments placed directly into current_dir
@@ -619,6 +623,17 @@ class CourseMarkdownConverter:
 
                     if not embed_url and content_id:
                         embed_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
+
+                    # embed_url is often an intermediate LTI launch link (e.g. .../execute/blti/launchLink)
+                    # rather than the actual Kaltura URL - try to resolve the real one via redirects
+                    # so the HTML launcher links straight to it and the entry id becomes visible.
+                    if embed_url_resolver and embed_url:
+                        try:
+                            resolved = await embed_url_resolver(f"{embed_url} {body}")
+                            if resolved:
+                                embed_url = resolved
+                        except Exception as e:
+                            logger.debug(f"Could not resolve embed URL for {title}: {e}")
 
                     # Kaltura video items are often embedded via body HTML with no
                     # separate downloadable "attachment" entry, so the per-attachment

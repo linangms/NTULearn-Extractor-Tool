@@ -533,12 +533,55 @@ class BlackboardClient:
         e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', text, re.I)
         return e_match.group(1) if e_match else None
 
+    async def _resolve_kaltura_url(self, text: str) -> Optional[str]:
+        """
+        Some video items (e.g. an LTI launch link like .../execute/blti/launchLink)
+        never expose a Kaltura entry id in Blackboard's own API response - it only
+        appears after following the launch redirect chain to the final Kaltura
+        browseandembed/media-redirect URL. This follows any URL(s) found in `text`
+        and returns the first resolved URL that contains a Kaltura entry id.
+
+        Best-effort: an LTI launch link normally requires the user's active browser
+        session, so this may simply fail to resolve past a login page when run
+        server-side - callers must treat a None result as "couldn't resolve".
+        """
+        import re
+        urls = re.findall(r'https?://[^\s"\'<>]+', text or "")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": f"{self.base_url}/",
+        }
+        for url in urls[:5]:
+            try:
+                resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
+                final_url = str(resp.url)
+                if self._extract_kaltura_entry_id(final_url):
+                    return final_url
+            except Exception as e:
+                logger.debug(f"Could not resolve Kaltura URL via redirect for {url}: {e}")
+        return None
+
+    async def resolve_kaltura_embed_url(self, text: str) -> Optional[str]:
+        """
+        Returns a direct, redirect-resolved Kaltura embed URL for `text` if one can
+        be found, so callers (e.g. the raw-file HTML launcher) can link straight to
+        it instead of an intermediate LTI launch link. Returns None if `text`
+        already contains a resolvable entry id (nothing to improve) or resolution fails.
+        """
+        if self._extract_kaltura_entry_id(text):
+            return None
+        return await self._resolve_kaltura_url(text)
+
     async def download_kaltura_caption_bytes(self, attachment_id: str) -> Optional[bytes]:
         """
         Fetches the real .srt/.vtt caption asset for a Kaltura video attachment,
         independent of whether the video itself downloads successfully.
         """
         entry_id = self._extract_kaltura_entry_id(attachment_id)
+        if not entry_id:
+            resolved_url = await self._resolve_kaltura_url(attachment_id)
+            if resolved_url:
+                entry_id = self._extract_kaltura_entry_id(resolved_url)
         if not entry_id:
             return None
         return await self._try_download_kaltura_captions(entry_id)
