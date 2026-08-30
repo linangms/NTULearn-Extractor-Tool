@@ -509,19 +509,27 @@ class CourseMarkdownConverter:
                     for att in attachments:
                         orig = att.get("originalUrl") or ""
                         dl = att.get("downloadUrl") or ""
-                        if orig and "playManifest" not in orig and "cdnapisec.kaltura.com" not in orig:
-                            embed_url = orig
+                        for candidate_url in [orig, dl]:
+                            if candidate_url and "playManifest" not in candidate_url and not candidate_url.startswith("undefined") and not candidate_url.startswith("javascript:"):
+                                embed_url = candidate_url
+                                break
+                        if embed_url:
                             break
-                        elif dl and "playManifest" not in dl and "cdnapisec.kaltura.com" not in dl:
-                            embed_url = dl
-                            break
-                    if not embed_url:
+
+                    if not embed_url and body:
                         import re
-                        m = re.search(r'href=["\']([^"\']+)["\']|src=["\']([^"\']+)["\']', body)
-                        if m:
-                            cand = m.group(1) or m.group(2) or ""
-                            if cand and "playManifest" not in cand and "cdnapisec.kaltura.com" not in cand:
+                        for m in re.finditer(r'(?:href|src)=["\']([^"\']+)["\']', body):
+                            cand = m.group(1) or ""
+                            if cand and "playManifest" not in cand and not cand.startswith("undefined") and not cand.startswith("javascript:"):
                                 embed_url = cand
+                                break
+
+                    if embed_url:
+                        if embed_url.startswith("undefined") or embed_url.startswith("javascript:"):
+                            embed_url = ""
+                        elif embed_url.startswith("/"):
+                            embed_url = f"{self.base_url}{embed_url}"
+
                     if not embed_url and content_id:
                         embed_url = f"{self.base_url}/webapps/blackboard/content/launchLink.jsp?course_id={self.course_id}&content_id={content_id}"
 
