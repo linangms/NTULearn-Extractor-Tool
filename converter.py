@@ -9,6 +9,20 @@ import markdownify
 
 logger = logging.getLogger("converter")
 
+def _is_valid_video_bytes(data: bytes) -> bool:
+    """
+    Checks for a real video binary signature so an HTML error/login page
+    (e.g. from an unresolved LTI launch link) doesn't get saved as if it
+    were the video itself.
+    """
+    if not data or len(data) < 1000:
+        return False
+    snippet = data[:64]
+    if snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+        return False
+    return bool(b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet)
+
+
 def _looks_like_kaltura_attachment(attachment_id: str, att: Dict[str, Any]) -> bool:
     """
     Cheap local check so we only ask the caption_downloader to hit Kaltura's API
@@ -350,10 +364,20 @@ class CourseMarkdownConverter:
                 if download_key:
                     try:
                         data = await downloader(self.course_id, content_id, download_key)
+                        lower_fn = filename.lower()
+                        is_video_filename = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
+                        real_transcript_saved = False
+
+                        if is_video_filename and data and not _is_valid_video_bytes(data):
+                            # download_attachment_bytes fell back to returning an
+                            # HTML/error page (e.g. an unresolved LTI launch link) -
+                            # don't save that mislabeled as a playable video file.
+                            logger.warning(f"Attachment {filename} returned non-video data ({len(data)} bytes). Skipping.")
+                            data = None
+
                         if data:
                             zf.writestr(zip_target_path, data)
                             extracted_text = extract_text_from_file_bytes(data, filename)
-                            lower_fn = filename.lower()
                             is_caption_data = (
                                 data.startswith(b"WEBVTT")
                                 or b"-->" in data[:500]
@@ -363,23 +387,22 @@ class CourseMarkdownConverter:
 
                             if is_caption_data:
                                 self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir, doc_text_map)
-                            else:
-                                if extracted_text and extracted_text.strip():
-                                    doc_text_map[filename] = extracted_text
+                                real_transcript_saved = True
+                            elif extracted_text and extracted_text.strip():
+                                doc_text_map[filename] = extracted_text
 
-                                # This attachment was the video itself (or another file) -
-                                # a Kaltura video's captions live as a separate asset, so
-                                # fetch them independently rather than only as a fallback
-                                # for when the video download fails.
-                                if caption_downloader and _looks_like_kaltura_attachment(download_key, att):
-                                    try:
-                                        cap_data = await caption_downloader(self.course_id, content_id, download_key)
-                                        if cap_data:
-                                            self._save_caption_and_transcript(
-                                                node, cap_data, "captions.srt", zf, current_dir, doc_text_map
-                                            )
-                                    except Exception as e:
-                                        logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
+                        # A Kaltura video's captions live as a separate asset, so fetch
+                        # them independently rather than only as a fallback for when
+                        # the video download fails or returns non-video data.
+                        if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(download_key, att):
+                            try:
+                                cap_data = await caption_downloader(self.course_id, content_id, download_key)
+                                if cap_data:
+                                    self._save_caption_and_transcript(
+                                        node, cap_data, "captions.srt", zf, current_dir, doc_text_map
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
 
