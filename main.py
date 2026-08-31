@@ -755,6 +755,12 @@ async def extract_course_stream(
                         await client.authenticate()
                         return await client.resolve_kaltura_embed_url(text)
                 embed_url_resolver_func = real_embed_url_resolver
+
+                async def real_video_downloader(text):
+                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                        await client.authenticate()
+                        return await client.download_kaltura_video_bytes(text)
+                video_downloader_func = real_video_downloader
             else:
                 async def mock_downloader(c_id, content_id, att_id):
                     return f"Simulated attachment binary content for {att_id}".encode("utf-8")
@@ -767,6 +773,10 @@ async def extract_course_stream(
                 async def mock_embed_url_resolver(text):
                     return None
                 embed_url_resolver_func = mock_embed_url_resolver
+
+                async def mock_video_downloader(text):
+                    return None
+                video_downloader_func = mock_video_downloader
 
             converter = CourseMarkdownConverter(course_title, course_id, base_url=bb_base_url)
             progress_queue = asyncio.Queue()
@@ -782,6 +792,7 @@ async def extract_course_stream(
                             attachment_downloader=downloader_func,
                             caption_downloader=caption_downloader_func,
                             embed_url_resolver=embed_url_resolver_func,
+                            video_downloader=video_downloader_func,
                             progress_callback=progress_cb,
                         )
                     else:

@@ -555,10 +555,12 @@ class BlackboardClient:
             try:
                 resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
                 final_url = str(resp.url)
-                if self._extract_kaltura_entry_id(final_url):
+                entry_id = self._extract_kaltura_entry_id(final_url)
+                logger.info(f"Kaltura URL resolution: {url} -> status={resp.status_code} final_url={final_url} entry_id_found={bool(entry_id)}")
+                if entry_id:
                     return final_url
             except Exception as e:
-                logger.debug(f"Could not resolve Kaltura URL via redirect for {url}: {e}")
+                logger.warning(f"Could not resolve Kaltura URL via redirect for {url}: {e}")
         return None
 
     async def resolve_kaltura_embed_url(self, text: str) -> Optional[str]:
@@ -572,19 +574,32 @@ class BlackboardClient:
             return None
         return await self._resolve_kaltura_url(text)
 
+    async def _resolve_kaltura_entry_id(self, text: str) -> Optional[str]:
+        entry_id = self._extract_kaltura_entry_id(text)
+        if entry_id:
+            return entry_id
+        resolved_url = await self._resolve_kaltura_url(text)
+        return self._extract_kaltura_entry_id(resolved_url) if resolved_url else None
+
     async def download_kaltura_caption_bytes(self, attachment_id: str) -> Optional[bytes]:
         """
         Fetches the real .srt/.vtt caption asset for a Kaltura video attachment,
         independent of whether the video itself downloads successfully.
         """
-        entry_id = self._extract_kaltura_entry_id(attachment_id)
-        if not entry_id:
-            resolved_url = await self._resolve_kaltura_url(attachment_id)
-            if resolved_url:
-                entry_id = self._extract_kaltura_entry_id(resolved_url)
+        entry_id = await self._resolve_kaltura_entry_id(attachment_id)
         if not entry_id:
             return None
         return await self._try_download_kaltura_captions(entry_id)
+
+    async def download_kaltura_video_bytes(self, attachment_id: str) -> Optional[bytes]:
+        """
+        Fetches raw MP4 bytes for a Kaltura video entry embedded via body/description
+        HTML (i.e. with no separate downloadable attachment entry pointing at it).
+        """
+        entry_id = await self._resolve_kaltura_entry_id(attachment_id)
+        if not entry_id:
+            return None
+        return await self._try_download_kaltura_video(entry_id, attachment_id)
 
     async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
         import re

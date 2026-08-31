@@ -428,6 +428,7 @@ class CourseMarkdownConverter:
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
         caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
         embed_url_resolver: Optional[Callable[[str], Any]] = None,
+        video_downloader: Optional[Callable[[str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
     ) -> bytes:
         """
@@ -447,6 +448,7 @@ class CourseMarkdownConverter:
                 attachment_downloader=attachment_downloader,
                 caption_downloader=caption_downloader,
                 embed_url_resolver=embed_url_resolver,
+                video_downloader=video_downloader,
                 progress_callback=progress_callback,
                 processed_count=[0],
                 total_nodes=total_nodes,
@@ -466,6 +468,7 @@ class CourseMarkdownConverter:
         total_nodes: int,
         caption_downloader: Optional[Callable] = None,
         embed_url_resolver: Optional[Callable] = None,
+        video_downloader: Optional[Callable] = None,
     ):
         for node in nodes:
             processed_count[0] += 1
@@ -511,6 +514,7 @@ class CourseMarkdownConverter:
                         total_nodes=total_nodes,
                         caption_downloader=caption_downloader,
                         embed_url_resolver=embed_url_resolver,
+                        video_downloader=video_downloader,
                     )
             else:
                 # Raw attachments placed directly into current_dir
@@ -653,7 +657,24 @@ class CourseMarkdownConverter:
                             except Exception as e:
                                 logger.warning(f"Failed to fetch Kaltura captions for {title}: {e}")
 
-                    if embed_url:
+                    # Try downloading the actual MP4 bytes directly via Kaltura's own API
+                    # using the resolved entry id - this needs no Blackboard session at all,
+                    # only an entry id and a Kaltura instance that permits API-based serving.
+                    real_video_saved = False
+                    if video_downloader:
+                        search_text = f"{embed_url} {body}"
+                        if _looks_like_kaltura_attachment(search_text, {}):
+                            try:
+                                video_data = await video_downloader(search_text)
+                                if video_data and len(video_data) > 10000:
+                                    zf.writestr(f"{current_dir}/{title}.mp4", video_data)
+                                    real_video_saved = True
+                                    if progress_callback:
+                                        await progress_callback(f"Downloaded video: {title} ({len(video_data)} bytes)", pct)
+                            except Exception as e:
+                                logger.warning(f"Failed to download Kaltura video for {title}: {e}")
+
+                    if embed_url and not real_video_saved:
                         html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -678,7 +699,7 @@ class CourseMarkdownConverter:
 </html>"""
                         zf.writestr(f"{current_dir}/{title}_Kaltura_Video.html", html_content)
                         zf.writestr(f"{current_dir}/{title}_Kaltura_Link.url", f"[InternetShortcut]\nURL={embed_url}\n")
-                        
+
                         readme_txt = f"""Kaltura Video: {node.get('title')}
 
 Direct MP4 video file download is protected by NTU's Kaltura media server policies (requires active NTULearn login session).
