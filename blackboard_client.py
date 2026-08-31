@@ -537,9 +537,14 @@ class BlackboardClient:
         """
         Some video items (e.g. an LTI launch link like .../execute/blti/launchLink)
         never expose a Kaltura entry id in Blackboard's own API response - it only
-        appears after following the launch redirect chain to the final Kaltura
-        browseandembed/media-redirect URL. This follows any URL(s) found in `text`
-        and returns the first resolved URL that contains a Kaltura entry id.
+        appears after the launch page navigates (often via client-side JavaScript,
+        not an HTTP redirect) to the final Kaltura browseandembed/media-redirect
+        URL. This follows any URL(s) found in `text`, and since a plain GET can't
+        execute that JS navigation, also scans the fetched page's own HTML/JS body
+        for an embedded Kaltura URL (e.g. in an iframe src or a window.location
+        assignment) - the browser has to get that destination from somewhere in
+        the page it received, so it should be present as plain text even when no
+        real HTTP redirect occurs.
 
         Best-effort: an LTI launch link normally requires the user's active browser
         session, so this may simply fail to resolve past a login page when run
@@ -556,7 +561,21 @@ class BlackboardClient:
                 resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
                 final_url = str(resp.url)
                 entry_id = self._extract_kaltura_entry_id(final_url)
-                logger.info(f"Kaltura URL resolution: {url} -> status={resp.status_code} final_url={final_url} entry_id_found={bool(entry_id)}")
+                body = resp.text if not entry_id else ""
+                if not entry_id and body:
+                    # No HTTP redirect happened - look for the actual destination
+                    # URL embedded in the page's own HTML/JS (iframe src, a plain
+                    # href, or a window.location assignment).
+                    for candidate in re.findall(r'https?://[^\s"\'<>\\]+', body):
+                        if self._extract_kaltura_entry_id(candidate):
+                            entry_id = self._extract_kaltura_entry_id(candidate)
+                            final_url = candidate
+                            break
+                logger.info(
+                    f"Kaltura URL resolution: {url} -> status={resp.status_code} "
+                    f"final_url={final_url} entry_id_found={bool(entry_id)} "
+                    f"body_len={len(body)} body_snippet={body[:300]!r}"
+                )
                 if entry_id:
                     return final_url
             except Exception as e:
