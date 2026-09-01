@@ -416,9 +416,16 @@ class CourseMarkdownConverter:
         zf: zipfile.ZipFile,
         current_dir: Optional[str],
         doc_text_map: Optional[Dict[str, str]] = None,
+        video_basename: Optional[str] = None,
     ) -> None:
         """
         Saves a raw .srt/.vtt subtitle file plus its cleaned plain-text transcript.
+
+        video_basename: when a real video file was also saved alongside this
+        (e.g. "MyLecture" for "MyLecture.mp4"), also writes a copy of the raw
+        subtitle named to match it exactly (e.g. "MyLecture.srt") - most media
+        players (VLC, Windows Media Player, etc.) only auto-load a subtitle
+        track when its filename matches the video's, not a suffixed variant.
         """
         clean_node_title = sanitize_filename(node.get("title", "Video"))
         sub_ext = ".vtt" if data.startswith(b"WEBVTT") or lower_fn.endswith(".vtt") else ".srt"
@@ -427,6 +434,10 @@ class CourseMarkdownConverter:
         # 1. Save raw subtitle file (.srt / .vtt)
         sub_filename = f"{clean_node_title}_subtitles{sub_ext}"
         zf.writestr(f"{target_dir}/{sub_filename}", data)
+
+        # 1b. Also save a copy matching the video's filename so players auto-load it
+        if video_basename:
+            zf.writestr(f"{target_dir}/{video_basename}{sub_ext}", data)
 
         # 2. Save converted plain text transcript (.txt)
         raw_text = data.decode("utf-8", errors="ignore")
@@ -596,7 +607,8 @@ class CourseMarkdownConverter:
                                             try:
                                                 cap_data = await caption_downloader(self.course_id, content_id, att_id)
                                                 if cap_data:
-                                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir)
+                                                    video_basename = os.path.splitext(filename)[0] if valid_video else None
+                                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir, video_basename=video_basename)
                                                     real_transcript_saved = True
                                                     if progress_callback:
                                                         clean_node_title = sanitize_filename(node.get("title", "Video"))
@@ -662,27 +674,11 @@ class CourseMarkdownConverter:
                         except Exception as e:
                             logger.debug(f"Could not resolve embed URL for {title}: {e}")
 
-                    # Kaltura video items are often embedded via body HTML with no
-                    # separate downloadable "attachment" entry, so the per-attachment
-                    # caption fetch above never runs for them. Try again here using
-                    # whatever Kaltura entry id can be found in the embed URL or body.
-                    if caption_downloader and not real_transcript_saved:
-                        search_text = f"{embed_url} {body}"
-                        if _looks_like_kaltura_attachment(search_text, {}):
-                            try:
-                                cap_data = await caption_downloader(self.course_id, content_id, search_text)
-                                if cap_data:
-                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir)
-                                    real_transcript_saved = True
-                                    if progress_callback:
-                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch Kaltura captions for {title}: {e}")
-
                     # Try downloading the actual MP4 bytes directly via Kaltura's own API
                     # using the resolved entry id - this needs no Blackboard session at all,
                     # only an entry id and a Kaltura instance that permits API-based serving.
+                    # Done before captions so a matching-filename subtitle copy can be
+                    # saved alongside it for player auto-load.
                     real_video_saved = False
                     if video_downloader:
                         search_text = f"{embed_url} {body}"
@@ -696,6 +692,25 @@ class CourseMarkdownConverter:
                                         await progress_callback(f"Downloaded video: {title} ({len(video_data)} bytes)", pct)
                             except Exception as e:
                                 logger.warning(f"Failed to download Kaltura video for {title}: {e}")
+
+                    # Kaltura video items are often embedded via body HTML with no
+                    # separate downloadable "attachment" entry, so the per-attachment
+                    # caption fetch above never runs for them. Try again here using
+                    # whatever Kaltura entry id can be found in the embed URL or body.
+                    if caption_downloader and not real_transcript_saved:
+                        search_text = f"{embed_url} {body}"
+                        if _looks_like_kaltura_attachment(search_text, {}):
+                            try:
+                                cap_data = await caption_downloader(self.course_id, content_id, search_text)
+                                if cap_data:
+                                    video_basename = title if real_video_saved else None
+                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir, video_basename=video_basename)
+                                    real_transcript_saved = True
+                                    if progress_callback:
+                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch Kaltura captions for {title}: {e}")
 
                     if embed_url and not real_video_saved:
                         html_content = f"""<!DOCTYPE html>
