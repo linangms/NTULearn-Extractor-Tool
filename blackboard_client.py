@@ -208,8 +208,9 @@ class BlackboardClient:
         return {}
 
     async def _build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+        import re
         content_id = item.get("id")
-        
+
         # Fetch detailed item endpoint to ensure complete HTML body/instructions are present
         if content_id:
             detail = await self.get_content_detail(course_id, content_id)
@@ -357,8 +358,25 @@ class BlackboardClient:
                 logger.warning(f"Could not parse HTML embedded links/media for {content_id}: {e}")
 
         # 4. Check handler / links for Kaltura / LTI placement items
-        handler_str = str(item.get("contentHandler", {})).lower()
+        handler_obj = item.get("contentHandler", {})
+        handler_str = str(handler_obj).lower()
         is_kaltura_handler = "kaltura" in handler_str or "media" in handler_str or "blti" in handler_str or "video" in handler_str
+
+        # Blackboard's contentHandler for an LTI-linked item can carry the tool's
+        # custom launch parameters (e.g. customParameters) directly in this JSON -
+        # if the Kaltura entry id is in there, we can use it without ever needing
+        # the interactive (SSO-gated) launch link at all. Search the raw object,
+        # not just its .id, and also the item's links array as a second source.
+        handler_entry_id_match = re.search(
+            r'(?:entry_id[=/"\':]|entryId/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b',
+            str(handler_obj) + " " + str(item.get("links", [])),
+            re.I,
+        )
+        if is_kaltura_handler:
+            if handler_entry_id_match:
+                logger.info(f"Kaltura entry id found directly in contentHandler/links for content {content_id}: {handler_entry_id_match.group(1)}")
+            else:
+                logger.info(f"No Kaltura entry id in contentHandler/links for content {content_id}. contentHandler={handler_obj!r} links={item.get('links', [])!r}")
 
         for lk in item.get("links", []):
             href = lk.get("href", "")
@@ -390,13 +408,30 @@ class BlackboardClient:
         if is_kaltura_handler and not attachments:
             fmt_id = self._format_course_id(course_id)
             launch_url = f"{self.base_url}/webapps/blackboard/execute/blti/launchLink?course_id={fmt_id}&content_id={content_id}&from_ultra=true"
-            attachments.append({
-                "id": launch_url,
-                "fileName": f"{title}.mp4",
-                "downloadUrl": launch_url,
-                "originalUrl": launch_url,
-                "isKaltura": True,
-            })
+            if handler_entry_id_match:
+                entry_id = handler_entry_id_match.group(1)
+                manifest_url = f"https://api.sg.kaltura.com/p/137/sp/13700/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4"
+                attachments.append({
+                    "id": manifest_url,
+                    "fileName": f"{title}.mp4",
+                    "downloadUrl": manifest_url,
+                    "originalUrl": launch_url,
+                    "isKaltura": True,
+                    "entryId": entry_id,
+                })
+            else:
+                # No entry id anywhere in Blackboard's own data for this item - this
+                # URL requires an active browser session to resolve (SSO-gated), so
+                # it will only ever work as a "watch in browser" link, not a direct
+                # download; download_attachment_bytes/converter still try to resolve
+                # it server-side as a last resort.
+                attachments.append({
+                    "id": launch_url,
+                    "fileName": f"{title}.mp4",
+                    "downloadUrl": launch_url,
+                    "originalUrl": launch_url,
+                    "isKaltura": True,
+                })
 
         node["attachments"] = attachments
 
