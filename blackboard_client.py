@@ -437,13 +437,14 @@ class BlackboardClient:
         p_match = re.search(r'/p/(\d+)', orig_url)
         if p_match:
             partner_candidates.append(p_match.group(1))
-        
-        for p in ["2342341", "2092301", "102", "103", "0"]:
+
+        for p in ["137", "2342341", "2092301", "102", "103", "0"]:
             if p not in partner_candidates:
                 partner_candidates.append(p)
-                
+
         for pid in partner_candidates:
             urls = [
+                f"https://api.sg.kaltura.com/p/{pid}/sp/{pid}00/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4",
                 f"https://cdnapisec.kaltura.com/p/{pid}/sp/{pid}00/playManifest/entryId/{entry_id}/format/url/flavorParamId/0/video.mp4",
                 f"https://cdn.kaltura.com/p/{pid}/sp/{pid}00/playManifest/entryId/{entry_id}/format/url/protocol/https/flavorParamId/0/video.mp4",
                 f"https://cfvod.kaltura.com/pd/p/{pid}/sp/{pid}00/serveFlavor/entryId/{entry_id}/v/11/flavorId/0/name/video.mp4",
@@ -471,11 +472,17 @@ class BlackboardClient:
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 
-    async def _get_kaltura_ks_token(self, partner_id: str = "2342341") -> Optional[str]:
+    # NTU's Kaltura instance is on the Singapore regional cluster (api.sg.kaltura.com)
+    # under partner id 137, confirmed from a live embed iframe's src URL. That partner
+    # id/host is tried first; the rest are kept as a fallback for other entries/tenants.
+    KALTURA_API_HOSTS = ["api.sg.kaltura.com", "cdnapisec.kaltura.com"]
+    KALTURA_PARTNER_IDS = ["137", "2342341", "2092301", "102", "103", "0"]
+
+    async def _get_kaltura_ks_token(self, partner_id: str = "137", api_host: str = "api.sg.kaltura.com") -> Optional[str]:
         """
         Obtains an authenticated Kaltura Session (ks) token for the user/session.
         """
-        session_url = "https://cdnapisec.kaltura.com/api_v3/service/session/action/startWidgetSession?format=1"
+        session_url = f"https://{api_host}/api_v3/service/session/action/startWidgetSession?format=1"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": f"{self.base_url}/",
@@ -488,7 +495,7 @@ class BlackboardClient:
                 if isinstance(data, dict) and data.get("ks"):
                     return data["ks"]
         except Exception as e:
-            logger.debug(f"Failed to start Kaltura widget session for partner {partner_id}: {e}")
+            logger.debug(f"Failed to start Kaltura widget session for partner {partner_id} on {api_host}: {e}")
         return None
 
     async def _try_download_kaltura_captions(self, entry_id: str) -> Optional[bytes]:
@@ -499,33 +506,34 @@ class BlackboardClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": f"{self.base_url}/",
         }
-        for partner_id in ["2342341", "2092301", "102", "103", "0"]:
-            ks = await self._get_kaltura_ks_token(partner_id)
-            ks_param = f"&ks={ks}" if ks else ""
-            api_url = f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/list?filter:entryIdEqual={entry_id}&partnerId={partner_id}{ks_param}&format=1"
-            try:
-                resp = await self._request_with_retry("GET", api_url, headers=headers, follow_redirects=True)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    objects = data.get("objects", []) if isinstance(data, dict) else []
-                    for obj in objects:
-                        caption_id = obj.get("id")
-                        if caption_id:
-                            serve_urls = [
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/servewebvtt/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
-                                f"https://cdnapisec.kaltura.com/api_v3/service/caption_captionasset/action/exportToSrt/id/{caption_id}?partnerId={partner_id}{ks_param}",
-                            ]
-                            for serve_url in serve_urls:
-                                try:
-                                    cap_resp = await self._request_with_retry("GET", serve_url, headers=headers, follow_redirects=True)
-                                    if cap_resp.status_code == 200 and len(cap_resp.content) > 10:
-                                        if not cap_resp.content.startswith(b"<") and not cap_resp.content.startswith(b"{"):
-                                            return cap_resp.content
-                                except Exception as e:
-                                    logger.debug(f"Kaltura serve caption URL failed ({serve_url}): {e}")
-            except Exception as e:
-                logger.debug(f"Could not fetch Kaltura captions for {entry_id} via partner {partner_id}: {e}")
+        for api_host in self.KALTURA_API_HOSTS:
+            for partner_id in self.KALTURA_PARTNER_IDS:
+                ks = await self._get_kaltura_ks_token(partner_id, api_host)
+                ks_param = f"&ks={ks}" if ks else ""
+                api_url = f"https://{api_host}/api_v3/service/caption_captionasset/action/list?filter:entryIdEqual={entry_id}&partnerId={partner_id}{ks_param}&format=1"
+                try:
+                    resp = await self._request_with_retry("GET", api_url, headers=headers, follow_redirects=True)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        objects = data.get("objects", []) if isinstance(data, dict) else []
+                        for obj in objects:
+                            caption_id = obj.get("id")
+                            if caption_id:
+                                serve_urls = [
+                                    f"https://{api_host}/api_v3/service/caption_captionasset/action/serve/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
+                                    f"https://{api_host}/api_v3/service/caption_captionasset/action/servewebvtt/captionAssetId/{caption_id}?partnerId={partner_id}{ks_param}",
+                                    f"https://{api_host}/api_v3/service/caption_captionasset/action/exportToSrt/id/{caption_id}?partnerId={partner_id}{ks_param}",
+                                ]
+                                for serve_url in serve_urls:
+                                    try:
+                                        cap_resp = await self._request_with_retry("GET", serve_url, headers=headers, follow_redirects=True)
+                                        if cap_resp.status_code == 200 and len(cap_resp.content) > 10:
+                                            if not cap_resp.content.startswith(b"<") and not cap_resp.content.startswith(b"{"):
+                                                return cap_resp.content
+                                    except Exception as e:
+                                        logger.debug(f"Kaltura serve caption URL failed ({serve_url}): {e}")
+                except Exception as e:
+                    logger.debug(f"Could not fetch Kaltura captions for {entry_id} via partner {partner_id} on {api_host}: {e}")
         return None
 
     def _extract_kaltura_entry_id(self, text: str) -> Optional[str]:
