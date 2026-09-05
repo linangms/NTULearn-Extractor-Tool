@@ -173,6 +173,50 @@ class BlackboardClient:
             return None
         return resp
 
+    # A real lecture video can be hundreds of MB to a few GB. _request_with_retry
+    # (via httpx's default .content) buffers a whole response in memory before
+    # we ever get to check its size - on a memory-constrained host that risks
+    # an OOM kill (the process gets silently restarted mid-extraction, which
+    # looks like a hung/dropped connection to the client). Video fetches use
+    # this capped streaming path instead, aborting as soon as the size limit
+    # is exceeded rather than after the whole file is already in RAM.
+    MAX_VIDEO_DOWNLOAD_BYTES = 300 * 1024 * 1024  # 300MB
+
+    async def _stream_fetch_capped(
+        self, url: str, headers: Optional[Dict[str, str]] = None, max_bytes: Optional[int] = None
+    ) -> Optional[bytes]:
+        max_bytes = max_bytes or self.MAX_VIDEO_DOWNLOAD_BYTES
+        client = self._client or httpx.AsyncClient(timeout=60.0)
+        close_needed = self._client is None
+        req_headers = {**self._get_headers(), **(headers or {})}
+        try:
+            async with client.stream("GET", url, headers=req_headers, follow_redirects=True) as resp:
+                if resp.status_code != 200:
+                    return None
+                final_url = str(resp.url)
+                if final_url != url and not await self._is_safe_public_url(final_url):
+                    logger.warning(f"Refusing to use response from unsafe redirect target (SSRF guard): {url} -> {final_url}")
+                    return None
+                content_length = resp.headers.get("content-length")
+                if content_length and int(content_length) > max_bytes:
+                    logger.warning(f"Skipping {url}: declared size {content_length} bytes exceeds {max_bytes}-byte cap")
+                    return None
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        logger.warning(f"Aborting download of {url}: exceeded {max_bytes}-byte cap mid-stream")
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except Exception as e:
+            logger.debug(f"Streaming fetch failed for {url}: {e}")
+            return None
+        finally:
+            if close_needed:
+                await client.aclose()
+
     def _get_course_id_candidates(self, course_id: str) -> List[str]:
         course_id_str = str(course_id).strip()
         if course_id_str in self._resolved_course_ids:
@@ -547,24 +591,27 @@ class BlackboardClient:
             ]
             for candidate_url in urls:
                 try:
-                    resp = await self._request_with_retry("GET", candidate_url, headers=headers, follow_redirects=True)
-                    if resp.status_code == 200 and len(resp.content) > 1000:
-                        snippet = resp.content[:64]
+                    content = await self._stream_fetch_capped(candidate_url, headers=headers)
+                    if content and len(content) > 1000:
+                        snippet = content[:64]
                         if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
                             if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
-                                logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({len(resp.content)} bytes) via {candidate_url}")
-                                return resp.content
+                                logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({len(content)} bytes) via {candidate_url}")
+                                return content
                 except Exception as e:
                     logger.debug(f"Kaltura candidate URL failed ({candidate_url}): {e}")
 
         if orig_url and orig_url.startswith("http"):
             try:
-                resp = await self._safe_fetch_external(orig_url, headers=headers)
-                if resp and resp.status_code == 200 and len(resp.content) > 1000:
-                    snippet = resp.content[:64]
-                    if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
-                        if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
-                            return resp.content
+                if await self._is_safe_public_url(orig_url):
+                    content = await self._stream_fetch_capped(orig_url, headers=headers)
+                    if content and len(content) > 1000:
+                        snippet = content[:64]
+                        if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
+                            if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
+                                return content
+                else:
+                    logger.warning(f"Refusing to fetch potentially unsafe URL (SSRF guard): {orig_url}")
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 
@@ -750,33 +797,34 @@ class BlackboardClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": f"{self.base_url}/",
         }
-        resp = await self._safe_fetch_external(url, headers=headers)
-        if resp is None:
-            logger.error(f"Refusing or failing to download attachment {attachment_id} (URL: {url})")
+        if not await self._is_safe_public_url(url):
+            logger.warning(f"Refusing to fetch potentially unsafe URL (SSRF guard): {url}")
             return None
-        if resp.status_code == 200:
-            content = resp.content
-            # If response is HTML launch page, scan for embedded Kaltura entry_id or .mp4 URL
-            if content.startswith(b"<!DOCTYPE") or content.startswith(b"<html") or content.startswith(b"<?xml") or b"<iframe" in content:
-                try:
-                    html_text = resp.text
-                    e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', html_text, re.I)
-                    if e_match:
-                        found_entry_id = e_match.group(1)
-                        k_bytes = await self._try_download_kaltura_video(found_entry_id, url)
-                        if k_bytes:
-                            return k_bytes
 
-                    mp4_match = re.search(r'(https?://[^\s"\']+\.mp4(?:\?[^\s"\']*)?)', html_text, re.I)
-                    if mp4_match:
-                        mp4_url = mp4_match.group(1)
-                        mp4_resp = await self._safe_fetch_external(mp4_url, headers=headers)
-                        if mp4_resp and mp4_resp.status_code == 200 and len(mp4_resp.content) > 10000:
-                            return mp4_resp.content
-                except Exception as e:
-                    logger.debug(f"Error parsing launch HTML page for video stream ({url}): {e}")
+        content = await self._stream_fetch_capped(url, headers=headers)
+        if content is None:
+            logger.error(f"Failed (or refused, or exceeded size cap) to download attachment {attachment_id} (URL: {url})")
+            return None
 
-            return content
+        # If response is HTML launch page, scan for embedded Kaltura entry_id or .mp4 URL
+        if content.startswith(b"<!DOCTYPE") or content.startswith(b"<html") or content.startswith(b"<?xml") or b"<iframe" in content:
+            try:
+                html_text = content.decode("utf-8", errors="ignore")
+                e_match = re.search(r'(?:entry_id[=/]|entryId/|kaltura.*?/|entry_id=|\b)([01]_[a-zA-Z0-9]{8,12})\b', html_text, re.I)
+                if e_match:
+                    found_entry_id = e_match.group(1)
+                    k_bytes = await self._try_download_kaltura_video(found_entry_id, url)
+                    if k_bytes:
+                        return k_bytes
 
-        logger.error(f"Failed to download attachment {attachment_id} (URL: {url}): HTTP status {resp.status_code}")
-        return None
+                mp4_match = re.search(r'(https?://[^\s"\']+\.mp4(?:\?[^\s"\']*)?)', html_text, re.I)
+                if mp4_match:
+                    mp4_url = mp4_match.group(1)
+                    if await self._is_safe_public_url(mp4_url):
+                        mp4_content = await self._stream_fetch_capped(mp4_url, headers=headers)
+                        if mp4_content and len(mp4_content) > 10000:
+                            return mp4_content
+            except Exception as e:
+                logger.debug(f"Error parsing launch HTML page for video stream ({url}): {e}")
+
+        return content
