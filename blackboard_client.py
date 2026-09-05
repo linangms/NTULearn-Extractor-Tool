@@ -1,5 +1,8 @@
 import asyncio
+import ipaddress
 import logging
+import socket
+import urllib.parse
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -118,6 +121,57 @@ class BlackboardClient:
         finally:
             if close_needed:
                 await client.aclose()
+
+    async def _is_safe_public_url(self, url: str) -> bool:
+        """
+        SSRF guard: rejects a URL unless it's plain http(s) and every address
+        its hostname resolves to is a normal public address - not loopback,
+        link-local (this blocks cloud metadata endpoints like
+        169.254.169.254), private, reserved, or multicast.
+
+        Needed because attachment/video URLs elsewhere in this file can
+        originate from instructor-authored course body HTML (e.g. an <a> tag
+        disguised as a lecture PDF link), which this app fetches server-side
+        and returns the content of, inside the student's downloaded package.
+        Without this check, a malicious course item could make the server
+        fetch and hand back internal/cloud-internal data.
+        """
+        try:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            hostname = parsed.hostname
+            if not hostname or hostname.lower() == "localhost":
+                return False
+            loop = asyncio.get_event_loop()
+            infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
+            if not infos:
+                return False
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    async def _safe_fetch_external(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[httpx.Response]:
+        """
+        Fetches a URL that (unlike this file's own hardcoded Kaltura/Blackboard
+        API calls) originates from instructor-authored course content, guarded
+        against SSRF - see _is_safe_public_url. Also re-checks the final URL
+        after any redirects, since a URL that starts out looking public could
+        still redirect to an internal address.
+        """
+        if not await self._is_safe_public_url(url):
+            logger.warning(f"Refusing to fetch potentially unsafe URL (SSRF guard): {url}")
+            return None
+        resp = await self._request_with_retry("GET", url, headers=headers or {}, follow_redirects=True)
+        final_url = str(resp.url)
+        if final_url != url and not await self._is_safe_public_url(final_url):
+            logger.warning(f"Refusing to use response from unsafe redirect target (SSRF guard): {url} -> {final_url}")
+            return None
+        return resp
 
     def _get_course_id_candidates(self, course_id: str) -> List[str]:
         course_id_str = str(course_id).strip()
@@ -505,8 +559,8 @@ class BlackboardClient:
 
         if orig_url and orig_url.startswith("http"):
             try:
-                resp = await self._request_with_retry("GET", orig_url, headers=headers, follow_redirects=True)
-                if resp.status_code == 200 and len(resp.content) > 1000:
+                resp = await self._safe_fetch_external(orig_url, headers=headers)
+                if resp and resp.status_code == 200 and len(resp.content) > 1000:
                     snippet = resp.content[:64]
                     if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
                         if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
@@ -608,7 +662,9 @@ class BlackboardClient:
         }
         for url in urls[:5]:
             try:
-                resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
+                resp = await self._safe_fetch_external(url, headers=headers)
+                if resp is None:
+                    continue
                 final_url = str(resp.url)
                 entry_id = self._extract_kaltura_entry_id(final_url)
                 body = resp.text if not entry_id else ""
@@ -694,7 +750,10 @@ class BlackboardClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": f"{self.base_url}/",
         }
-        resp = await self._request_with_retry("GET", url, headers=headers, follow_redirects=True)
+        resp = await self._safe_fetch_external(url, headers=headers)
+        if resp is None:
+            logger.error(f"Refusing or failing to download attachment {attachment_id} (URL: {url})")
+            return None
         if resp.status_code == 200:
             content = resp.content
             # If response is HTML launch page, scan for embedded Kaltura entry_id or .mp4 URL
@@ -711,8 +770,8 @@ class BlackboardClient:
                     mp4_match = re.search(r'(https?://[^\s"\']+\.mp4(?:\?[^\s"\']*)?)', html_text, re.I)
                     if mp4_match:
                         mp4_url = mp4_match.group(1)
-                        mp4_resp = await self._request_with_retry("GET", mp4_url, headers=headers, follow_redirects=True)
-                        if mp4_resp.status_code == 200 and len(mp4_resp.content) > 10000:
+                        mp4_resp = await self._safe_fetch_external(mp4_url, headers=headers)
+                        if mp4_resp and mp4_resp.status_code == 200 and len(mp4_resp.content) > 10000:
                             return mp4_resp.content
                 except Exception as e:
                     logger.debug(f"Error parsing launch HTML page for video stream ({url}): {e}")

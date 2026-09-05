@@ -27,7 +27,12 @@ app = FastAPI(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception on {request.method} {request.url}: {exc}", exc_info=True)
+    error_ref = str(uuid.uuid4())[:8]
+    logger.error(f"Unhandled exception [ref={error_ref}] on {request.method} {request.url}: {exc}", exc_info=True)
+    # Never echo raw exception text to the client - it can reveal internal
+    # paths, hostnames, or other implementation details. Log the full error
+    # server-side under error_ref and show the user only that reference, so
+    # a report ("issue ref abc12345") can be correlated with the logs.
     return HTMLResponse(
         content=f"""
         <!DOCTYPE html>
@@ -43,8 +48,9 @@ async def global_exception_handler(request: Request, exc: Exception):
                 </div>
                 <h2 class="text-2xl font-extrabold text-slate-900">Application Notice</h2>
                 <p class="text-sm text-slate-600 leading-relaxed">
-                    The tool encountered an issue while processing this request: <br/>
-                    <code class="text-xs bg-slate-100 p-2 rounded text-amber-800 font-mono block mt-2 text-left overflow-x-auto">{str(exc)}</code>
+                    The tool encountered an issue while processing this request.<br/>
+                    If this persists, please report it with this reference:<br/>
+                    <code class="text-xs bg-slate-100 p-2 rounded text-amber-800 font-mono block mt-2 text-left overflow-x-auto">{error_ref}</code>
                 </p>
                 <div class="pt-4 flex justify-center gap-3">
                     <a href="/" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-2.5 rounded-xl transition-all shadow-md">
@@ -695,15 +701,17 @@ async def extract_course_stream(
                         tree = await bb_client.get_contents_tree(course_id)
                         yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
                 except Exception as api_err:
-                    err_msg = f"Blackboard REST API Auth Error ({api_err}). Check Application ID & Secret."
-                    logger.error(err_msg, exc_info=True)
-                    yield f"data: {json.dumps({'stage': 1, 'progress': 30, 'message': f'REST API Auth Notice: {api_err}. Generating package for {course_id}...', 'status': 'running'})}\n\n"
+                    # Logged with full detail server-side only - never echoed to the
+                    # client or, worse, baked into the mock package the user downloads,
+                    # since it can reveal internal hostnames/credentials/config details.
+                    logger.error(f"Blackboard REST API Auth Error [task_id={task_id}]: {api_err}", exc_info=True)
+                    yield f"data: {json.dumps({'stage': 1, 'progress': 30, 'message': f'Could not authenticate with the live Blackboard REST API (ref: {task_id[:8]}). Generating a placeholder package for {course_id}...', 'status': 'running'})}\n\n"
                     tree = [
                         {
                             "id": f"{course_id}_overview",
                             "title": f"{course_id} - Course Overview & Syllabus",
                             "isFolder": False,
-                            "body": f"<h2>Welcome to {display_title}</h2><p>Course content extracted for {course_id}. Note: Live Blackboard REST API returned {api_err}.</p><p><a href='/bbcswebdav/xid-{course_id}_syllabus'>{course_id}_Syllabus_2026.pdf</a></p>",
+                            "body": f"<h2>Welcome to {display_title}</h2><p>Course content extracted for {course_id}. Note: the live Blackboard REST API could not be reached (ref: {task_id[:8]}).</p><p><a href='/bbcswebdav/xid-{course_id}_syllabus'>{course_id}_Syllabus_2026.pdf</a></p>",
                             "attachments": [
                                 {"id": f"att_{course_id}_1", "fileName": f"{course_id}_Syllabus_2026.pdf", "originalUrl": f"/bbcswebdav/xid-{course_id}_syllabus"}
                             ]
@@ -897,8 +905,11 @@ async def extract_course_stream(
             yield f"data: {json.dumps({'stage': 4, 'progress': 100, 'message': 'Extraction completed successfully!', 'status': 'completed', 'task_id': task_id})}\n\n"
 
         except Exception as e:
-            logger.error(f"Error during extraction stream: {e}", exc_info=True)
-            yield f"data: {json.dumps({'stage': 0, 'progress': 0, 'message': str(e), 'status': 'error'})}\n\n"
+            # Log the real error server-side under task_id, but never echo raw
+            # exception text to the client - it can reveal internal details
+            # (paths, hostnames, Blackboard API responses).
+            logger.error(f"Error during extraction stream [task_id={task_id}]: {e}", exc_info=True)
+            yield f"data: {json.dumps({'stage': 0, 'progress': 0, 'message': f'Extraction failed (ref: {task_id[:8]}). Please try again or contact support.', 'status': 'error'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
