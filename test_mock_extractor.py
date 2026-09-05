@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import zipfile
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -81,28 +82,31 @@ def test_converter_build_zip_package():
         async def mock_downloader(course_id, content_id, att_id):
             return b"%PDF-1.4 Mock PDF Content"
 
-        zip_bytes = await converter.build_zip_package(
+        zip_path = await converter.build_zip_package(
             content_tree=content_tree,
             attachment_downloader=mock_downloader
         )
 
-        assert len(zip_bytes) > 0
+        try:
+            assert os.path.getsize(zip_path) > 0
 
-        # Verify Zip structure
-        with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
-            namelist = zf.namelist()
-            
-            # Check README.md
-            assert any("README.md" in name for name in namelist)
-            
-            # Check folder index.md
-            assert any("Module 1 - Neural Networks/index.md" in name for name in namelist)
-            
-            # Check document .md
-            assert any("Lecture Notes 1.md" in name for name in namelist)
-            
-            # Check attachment download
-            assert any("Lecture1.pdf" in name for name in namelist)
+            # Verify Zip structure
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                namelist = zf.namelist()
+
+                # Check README.md
+                assert any("README.md" in name for name in namelist)
+
+                # Check folder index.md
+                assert any("Module 1 - Neural Networks/index.md" in name for name in namelist)
+
+                # Check document .md
+                assert any("Lecture Notes 1.md" in name for name in namelist)
+
+                # Check attachment download
+                assert any("Lecture1.pdf" in name for name in namelist)
+        finally:
+            os.remove(zip_path)
 
     asyncio.run(_test())
 

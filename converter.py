@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import tempfile
 import zipfile
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -226,17 +227,21 @@ class CourseMarkdownConverter:
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
         caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
-    ) -> bytes:
+    ) -> str:
         """
         Processes content tree, creates all converted .md files in ONE single folder inside the zip archive.
+        Writes directly to a temp file on disk (rather than an in-memory buffer) so a
+        large course doesn't hold its whole compressed archive in RAM at once. Returns
+        the temp file path; the caller is responsible for deleting it once served.
         """
-        zip_buffer = io.BytesIO()
+        fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
 
         flat_items = []
         self._flatten_tree(content_tree, flat_items)
         total_nodes = len(flat_items)
 
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             out_folder = self.root_folder_name
 
             readme_content = f"# {self.course_name}\n\n"
@@ -338,8 +343,7 @@ class CourseMarkdownConverter:
 
                 zf.writestr(file_path, full_md)
 
-        zip_buffer.seek(0)
-        return zip_buffer.getvalue()
+        return zip_path
 
     async def _handle_attachments(
         self,
@@ -486,17 +490,19 @@ class CourseMarkdownConverter:
         embed_url_resolver: Optional[Callable[[str], Any]] = None,
         video_downloader: Optional[Callable[[str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
-    ) -> bytes:
+    ) -> str:
         """
         Builds a ZIP package containing ONLY raw course files, PDFs, slides, and documents.
-        Bypasses all Markdown conversion completely.
+        Bypasses all Markdown conversion completely. Writes directly to a temp file on
+        disk (see build_zip_package) and returns its path.
         """
-        zip_buffer = io.BytesIO()
+        fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
         total_nodes = self._count_nodes(content_tree)
         safe_name = sanitize_filename(self.clean_course_name)
         root_dir = f"{safe_name}_RawFiles"
 
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             await self._process_raw_node_list(
                 nodes=content_tree,
                 current_dir=root_dir,
@@ -510,8 +516,7 @@ class CourseMarkdownConverter:
                 total_nodes=total_nodes,
             )
 
-        zip_buffer.seek(0)
-        return zip_buffer.getvalue()
+        return zip_path
 
     async def _process_raw_node_list(
         self,

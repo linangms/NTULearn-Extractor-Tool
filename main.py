@@ -9,7 +9,7 @@ import uuid
 import logging
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, Response, Form, Query, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -913,16 +913,19 @@ async def extract_course_stream(
                 calc_pct = min(94, 75 + int(pct * 0.19))
                 yield f"data: {json.dumps({'stage': 3, 'progress': calc_pct, 'message': msg, 'status': 'running'})}\n\n"
 
-            zip_bytes = await pkg_task
+            zip_path = await pkg_task
 
             yield f"data: {json.dumps({'stage': 4, 'progress': 95, 'message': 'Finalizing Zip package archive...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
 
-            # Store zip archive in task storage
+            # Store the on-disk zip path in task storage (not the bytes - a large
+            # course's archive is written straight to a temp file so it's never
+            # fully buffered in RAM, which is what was crashing the process on
+            # memory-constrained hosting for big courses).
             task_storage[task_id] = {
                 "course_id": course_id,
                 "course_title": display_title,
-                "zip_bytes": zip_bytes,
+                "zip_path": zip_path,
                 "mode": mode,
             }
 
@@ -947,7 +950,10 @@ async def download_package(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Download package not found or expired.")
 
-    zip_bytes = task["zip_bytes"]
+    zip_path = task["zip_path"]
+    if not os.path.exists(zip_path):
+        raise HTTPException(status_code=404, detail="Download package not found or expired.")
+
     mode = task.get("mode", "markdown")
     course_name_raw = task.get("course_title") or task.get("course_id") or "Course"
     clean_name = re.sub(r'\s*-\s*Course Materials$', '', course_name_raw, flags=re.IGNORECASE).strip()
@@ -958,8 +964,8 @@ async def download_package(task_id: str):
     else:
         filename = f"{safe_name}_markdown_package.zip"
 
-    return Response(
-        content=zip_bytes,
+    return FileResponse(
+        zip_path,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        filename=filename,
     )
