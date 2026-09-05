@@ -7,7 +7,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 import markdownify
 
+from blackboard_client import FileTooLargeError
+
 logger = logging.getLogger("converter")
+
+
+def _format_mb(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.0f}MB"
 
 def _is_valid_video_bytes(data: bytes) -> bool:
     """
@@ -251,13 +257,14 @@ class CourseMarkdownConverter:
                 filename = f"{idx:02d}_{clean_title}.md"
                 file_path = f"{out_folder}/{filename}"
 
+                pct = (idx / max(1, total_nodes)) * 100
                 if progress_callback:
-                    pct = (idx / max(1, total_nodes)) * 100
                     await progress_callback(f"Converting Markdown for: {item.get('title')}", pct)
 
                 attachments_dir = f"{out_folder}/attachments"
                 attachment_map, doc_text_map = await self._handle_attachments(
-                    item, attachments_dir, zf, attachment_downloader, caption_downloader=caption_downloader
+                    item, attachments_dir, zf, attachment_downloader,
+                    caption_downloader=caption_downloader, progress_callback=progress_callback, pct=pct,
                 )
 
                 body = (
@@ -342,6 +349,8 @@ class CourseMarkdownConverter:
         downloader: Optional[Callable],
         current_dir: Optional[str] = None,
         caption_downloader: Optional[Callable] = None,
+        progress_callback: Optional[Callable] = None,
+        pct: float = 0,
     ) -> Tuple[Dict[str, str], Dict[str, str]]:
         mapping = {}
         doc_text_map = {}
@@ -362,49 +371,62 @@ class CourseMarkdownConverter:
             if downloader and content_id:
                 download_key = att.get("downloadUrl") or att_id
                 if download_key:
+                    real_transcript_saved = False
+                    lower_fn = filename.lower()
+                    is_video_filename = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
+
+                    data = None
                     try:
                         data = await downloader(self.course_id, content_id, download_key)
-                        lower_fn = filename.lower()
-                        is_video_filename = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
-                        real_transcript_saved = False
 
                         if is_video_filename and data and not _is_valid_video_bytes(data):
                             # download_attachment_bytes fell back to returning an
                             # HTML/error page (e.g. an unresolved LTI launch link) -
                             # don't save that mislabeled as a playable video file.
                             logger.warning(f"Attachment {filename} returned non-video data ({len(data)} bytes). Skipping.")
+                            if progress_callback:
+                                await progress_callback(f"Skipped {filename}: server returned an error page instead of the file", pct)
                             data = None
-
-                        if data:
-                            zf.writestr(zip_target_path, data)
-                            extracted_text = extract_text_from_file_bytes(data, filename)
-                            is_caption_data = (
-                                data.startswith(b"WEBVTT")
-                                or b"-->" in data[:500]
-                                or lower_fn.endswith(".srt")
-                                or lower_fn.endswith(".vtt")
-                            )
-
-                            if is_caption_data:
-                                self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir, doc_text_map)
-                                real_transcript_saved = True
-                            elif extracted_text and extracted_text.strip():
-                                doc_text_map[filename] = extracted_text
-
-                        # A Kaltura video's captions live as a separate asset, so fetch
-                        # them independently rather than only as a fallback for when
-                        # the video download fails or returns non-video data.
-                        if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(download_key, att):
-                            try:
-                                cap_data = await caption_downloader(self.course_id, content_id, download_key)
-                                if cap_data:
-                                    self._save_caption_and_transcript(
-                                        node, cap_data, "captions.srt", zf, current_dir, doc_text_map
-                                    )
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
+                    except FileTooLargeError as e:
+                        size_str = _format_mb(e.size_bytes)
+                        logger.warning(f"Skipped {filename}: exceeds size cap ({size_str})")
+                        if progress_callback:
+                            await progress_callback(f"Skipped {filename}: exceeds 300MB size limit ({size_str}) - extracting transcript only", pct)
                     except Exception as e:
                         logger.error(f"Failed to download attachment {filename}: {e}")
+                        if progress_callback:
+                            await progress_callback(f"Error downloading {filename}: download failed, skipping", pct)
+
+                    if data:
+                        zf.writestr(zip_target_path, data)
+                        extracted_text = extract_text_from_file_bytes(data, filename)
+                        is_caption_data = (
+                            data.startswith(b"WEBVTT")
+                            or b"-->" in data[:500]
+                            or lower_fn.endswith(".srt")
+                            or lower_fn.endswith(".vtt")
+                        )
+
+                        if is_caption_data:
+                            self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir, doc_text_map)
+                            real_transcript_saved = True
+                        elif extracted_text and extracted_text.strip():
+                            doc_text_map[filename] = extracted_text
+
+                    # A Kaltura video's captions live as a separate asset, so fetch
+                    # them independently rather than only as a fallback for when
+                    # the video download fails, is too large, or returns non-video data.
+                    if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(download_key, att):
+                        try:
+                            cap_data = await caption_downloader(self.course_id, content_id, download_key)
+                            if cap_data:
+                                self._save_caption_and_transcript(
+                                    node, cap_data, "captions.srt", zf, current_dir, doc_text_map
+                                )
+                                if progress_callback:
+                                    await progress_callback(f"Downloaded transcript for: {filename}", pct)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
 
         return mapping, doc_text_map
 
@@ -533,8 +555,15 @@ class CourseMarkdownConverter:
                                     zf.writestr(zip_target_path, data)
                                     if progress_callback:
                                         await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                            except FileTooLargeError as e:
+                                size_str = _format_mb(e.size_bytes)
+                                logger.warning(f"Skipped {filename}: exceeds size cap ({size_str})")
+                                if progress_callback:
+                                    await progress_callback(f"Skipped {filename}: exceeds 300MB size limit ({size_str})", pct)
                             except Exception as e:
                                 logger.error(f"Failed to download folder attachment {filename}: {e}")
+                                if progress_callback:
+                                    await progress_callback(f"Error downloading {filename}: download failed, skipping", pct)
 
                 children = node.get("children", [])
                 if children:
@@ -563,63 +592,82 @@ class CourseMarkdownConverter:
                         if attachment_downloader and content_id and att_id:
                             if progress_callback:
                                 await progress_callback(f"Downloading file: {filename}...", pct)
+
+                            async def _try_caption_fallback(valid_video_flag):
+                                nonlocal real_transcript_saved
+                                if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(att_id, att):
+                                    try:
+                                        cap_data = await caption_downloader(self.course_id, content_id, att_id)
+                                        if cap_data:
+                                            video_basename = os.path.splitext(filename)[0] if valid_video_flag else None
+                                            self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir, video_basename=video_basename)
+                                            real_transcript_saved = True
+                                            if progress_callback:
+                                                clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                                await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
+
+                            data = None
                             try:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
-                                if data and len(data) > 100:
-                                    lower_fn = filename.lower()
-                                    is_caption_data = (
-                                        data.startswith(b"WEBVTT")
-                                        or b"-->" in data[:500]
-                                        or lower_fn.endswith(".srt")
-                                        or lower_fn.endswith(".vtt")
-                                    )
-
-                                    if is_caption_data:
-                                        # Save both raw .srt / .vtt subtitle file AND converted plain text .txt transcript!
-                                        self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir)
-                                        downloaded_any = True
-                                        real_transcript_saved = True
-                                        if progress_callback:
-                                            clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                            await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
-                                    else:
-                                        is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
-
-                                        # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
-                                        valid_video = True
-                                        if is_video_file:
-                                            snippet = data[:64]
-                                            if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
-                                                valid_video = False
-                                            elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
-                                                valid_video = False
-
-                                        if valid_video:
-                                            zf.writestr(zip_target_path, data)
-                                            downloaded_any = True
-                                            if progress_callback:
-                                                await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
-
-                                        # The Kaltura caption/subtitle asset is separate from the video
-                                        # asset itself, so fetch it independently rather than only as a
-                                        # fallback for when the video download fails.
-                                        if caption_downloader and not real_transcript_saved and _looks_like_kaltura_attachment(att_id, att):
-                                            try:
-                                                cap_data = await caption_downloader(self.course_id, content_id, att_id)
-                                                if cap_data:
-                                                    video_basename = os.path.splitext(filename)[0] if valid_video else None
-                                                    self._save_caption_and_transcript(node, cap_data, "captions.srt", zf, current_dir, video_basename=video_basename)
-                                                    real_transcript_saved = True
-                                                    if progress_callback:
-                                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
-                                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
-                                            except Exception as e:
-                                                logger.warning(f"Failed to fetch Kaltura captions for {filename}: {e}")
-
-                                        if not valid_video:
-                                            logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
+                            except FileTooLargeError as e:
+                                size_str = _format_mb(e.size_bytes)
+                                logger.warning(f"Skipped {filename}: exceeds size cap ({size_str})")
+                                if progress_callback:
+                                    await progress_callback(f"Skipped {filename}: exceeds 300MB size limit ({size_str}) - extracting transcript only", pct)
                             except Exception as e:
                                 logger.error(f"Failed to download raw attachment {filename}: {e}")
+                                if progress_callback:
+                                    await progress_callback(f"Error downloading {filename}: download failed, skipping", pct)
+
+                            if data and len(data) > 100:
+                                lower_fn = filename.lower()
+                                is_caption_data = (
+                                    data.startswith(b"WEBVTT")
+                                    or b"-->" in data[:500]
+                                    or lower_fn.endswith(".srt")
+                                    or lower_fn.endswith(".vtt")
+                                )
+
+                                if is_caption_data:
+                                    # Save both raw .srt / .vtt subtitle file AND converted plain text .txt transcript!
+                                    self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir)
+                                    downloaded_any = True
+                                    real_transcript_saved = True
+                                    if progress_callback:
+                                        clean_node_title = sanitize_filename(node.get("title", "Video"))
+                                        await progress_callback(f"Downloaded subtitles & transcript for: {clean_node_title}", pct)
+                                else:
+                                    is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
+
+                                    # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
+                                    valid_video = True
+                                    if is_video_file:
+                                        snippet = data[:64]
+                                        if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
+                                            valid_video = False
+                                        elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
+                                            valid_video = False
+
+                                    if valid_video:
+                                        zf.writestr(zip_target_path, data)
+                                        downloaded_any = True
+                                        if progress_callback:
+                                            await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                    else:
+                                        logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
+                                        if progress_callback:
+                                            await progress_callback(f"Skipped {filename}: server returned an error page instead of the file", pct)
+
+                                    # The Kaltura caption/subtitle asset is separate from the video
+                                    # asset itself, so fetch it independently rather than only as a
+                                    # fallback for when the video download fails.
+                                    await _try_caption_fallback(valid_video)
+                            else:
+                                # No data at all (too large, failed, or empty) - if this
+                                # looks like a Kaltura video, still get at least the transcript.
+                                await _try_caption_fallback(False)
 
                 # Check if this item is a Kaltura / Panopto / Video item
                 body = node.get("body") or node.get("description") or node.get("instructions") or ""
@@ -690,8 +738,15 @@ class CourseMarkdownConverter:
                                     real_video_saved = True
                                     if progress_callback:
                                         await progress_callback(f"Downloaded video: {title} ({len(video_data)} bytes)", pct)
+                            except FileTooLargeError as e:
+                                size_str = _format_mb(e.size_bytes)
+                                logger.warning(f"Skipped video {title}: exceeds size cap ({size_str})")
+                                if progress_callback:
+                                    await progress_callback(f"Skipped video {title}: exceeds 300MB size limit ({size_str}) - extracting transcript only", pct)
                             except Exception as e:
                                 logger.warning(f"Failed to download Kaltura video for {title}: {e}")
+                                if progress_callback:
+                                    await progress_callback(f"Error downloading video {title}: download failed, skipping", pct)
 
                     # Kaltura video items are often embedded via body HTML with no
                     # separate downloadable "attachment" entry, so the per-attachment

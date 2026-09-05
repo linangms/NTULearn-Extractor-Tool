@@ -9,6 +9,21 @@ import httpx
 logger = logging.getLogger("blackboard_client")
 logging.basicConfig(level=logging.INFO)
 
+
+class FileTooLargeError(Exception):
+    """
+    Raised by _stream_fetch_capped when a file exceeds the size cap, so
+    callers can surface a specific "skipped: too large" message to the user
+    (with the file's actual/declared size) instead of a generic failure, and
+    fall back to a lighter alternative (e.g. captions instead of the video
+    itself) rather than just giving up on the whole item.
+    """
+    def __init__(self, size_bytes: int, declared: bool):
+        self.size_bytes = size_bytes
+        self.declared = declared  # True if known via Content-Length, False if hit mid-stream
+        super().__init__(f"File exceeds size cap: {size_bytes} bytes ({'declared' if declared else 'detected mid-stream'})")
+
+
 class BlackboardClient:
     """
     Async client for Blackboard Learn REST APIs.
@@ -200,16 +215,18 @@ class BlackboardClient:
                 content_length = resp.headers.get("content-length")
                 if content_length and int(content_length) > max_bytes:
                     logger.warning(f"Skipping {url}: declared size {content_length} bytes exceeds {max_bytes}-byte cap")
-                    return None
+                    raise FileTooLargeError(int(content_length), declared=True)
                 chunks = []
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if total > max_bytes:
                         logger.warning(f"Aborting download of {url}: exceeded {max_bytes}-byte cap mid-stream")
-                        return None
+                        raise FileTooLargeError(total, declared=False)
                     chunks.append(chunk)
                 return b"".join(chunks)
+        except FileTooLargeError:
+            raise
         except Exception as e:
             logger.debug(f"Streaming fetch failed for {url}: {e}")
             return None
@@ -598,6 +615,12 @@ class BlackboardClient:
                             if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
                                 logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({len(content)} bytes) via {candidate_url}")
                                 return content
+                except FileTooLargeError:
+                    # Every candidate URL serves the same underlying video, so
+                    # if one mirror is too large they all will be - no point
+                    # trying the rest. Propagate so the caller can report the
+                    # actual size and fall back to captions-only.
+                    raise
                 except Exception as e:
                     logger.debug(f"Kaltura candidate URL failed ({candidate_url}): {e}")
 
@@ -612,6 +635,8 @@ class BlackboardClient:
                                 return content
                 else:
                     logger.warning(f"Refusing to fetch potentially unsafe URL (SSRF guard): {orig_url}")
+            except FileTooLargeError:
+                raise
             except Exception as e:
                 logger.debug(f"Kaltura orig_url failed ({orig_url}): {e}")
 
