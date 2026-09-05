@@ -52,7 +52,7 @@ def _write_downloaded(zf: "zipfile.ZipFile", zip_target_path: str, data) -> Opti
     return data
 
 
-async def _ensure_expanded(item: Dict[str, Any], course_id: Optional[str], expand_fn: Optional[Callable]) -> Dict[str, Any]:
+async def _ensure_expanded(item: Dict[str, Any], course_id: Optional[str], expand_fn: Optional[Callable], parent_title: Optional[str] = None) -> Dict[str, Any]:
     """
     Expands a raw, unbuilt child item (as returned by Blackboard's shallow
     /children listing) into a fully built node - title, body, attachments,
@@ -62,10 +62,12 @@ async def _ensure_expanded(item: Dict[str, Any], course_id: Optional[str], expan
     built before any of it can be processed. Already-built nodes (recognized
     by an "attachments" key, which every real build sets and a raw API item
     never has) and pre-built trees (expand_fn is None, e.g. the mock/test
-    content trees) pass through unchanged.
+    content trees) pass through unchanged. parent_title is passed down so a
+    node with a generic Blackboard-assigned title (e.g. Ultra's
+    "ultraDocumentBody" wrapper) can fall back to its parent's real name.
     """
     if expand_fn is not None and "attachments" not in item:
-        return await expand_fn(course_id, item)
+        return await expand_fn(course_id, item, parent_title)
     return item
 
 
@@ -235,6 +237,7 @@ class CourseMarkdownConverter:
         folder_path: str = "",
         course_id: Optional[str] = None,
         expand_fn: Optional[Callable] = None,
+        parent_title: Optional[str] = None,
     ):
         # expand_fn (BlackboardClient.build_content_node), when given, expands
         # a raw child stub into a full node one at a time, right before it's
@@ -242,7 +245,7 @@ class CourseMarkdownConverter:
         # the mock/test content trees), every node is already fully built and
         # this behaves exactly as it always did.
         for raw_node in nodes:
-            node = await _ensure_expanded(raw_node, course_id, expand_fn)
+            node = await _ensure_expanded(raw_node, course_id, expand_fn, parent_title)
             title = node.get("title", "Untitled")
             current_path = f"{folder_path} / {title}" if folder_path else title
 
@@ -262,7 +265,7 @@ class CourseMarkdownConverter:
                     node_copy = dict(node)
                     node_copy["folder_path"] = folder_path
                     flat_list.append(node_copy)
-                await self._flatten_tree(children, flat_list, folder_path=current_path, course_id=course_id, expand_fn=expand_fn)
+                await self._flatten_tree(children, flat_list, folder_path=current_path, course_id=course_id, expand_fn=expand_fn, parent_title=title)
             else:
                 node_copy = dict(node)
                 node_copy["folder_path"] = folder_path
@@ -274,6 +277,7 @@ class CourseMarkdownConverter:
         folder_path: str = "",
         course_id: Optional[str] = None,
         expand_fn: Optional[Callable] = None,
+        parent_title: Optional[str] = None,
     ):
         """
         Same traversal as _flatten_tree, but yields one flattened item at a
@@ -286,7 +290,7 @@ class CourseMarkdownConverter:
         not just between top-level topics.
         """
         for raw_node in nodes:
-            node = await _ensure_expanded(raw_node, course_id, expand_fn)
+            node = await _ensure_expanded(raw_node, course_id, expand_fn, parent_title)
             title = node.get("title", "Untitled")
             current_path = f"{folder_path} / {title}" if folder_path else title
 
@@ -306,7 +310,7 @@ class CourseMarkdownConverter:
                     node_copy = dict(node)
                     node_copy["folder_path"] = folder_path
                     yield node_copy
-                async for item in self._iter_flatten_tree(children, folder_path=current_path, course_id=course_id, expand_fn=expand_fn):
+                async for item in self._iter_flatten_tree(children, folder_path=current_path, course_id=course_id, expand_fn=expand_fn, parent_title=title):
                     yield item
             else:
                 node_copy = dict(node)
@@ -763,6 +767,7 @@ class CourseMarkdownConverter:
         progress_span: float = 100.0,
         course_id: Optional[str] = None,
         expand_fn: Optional[Callable] = None,
+        parent_title: Optional[str] = None,
     ):
         # progress_base/progress_span let a caller processing one topic at a
         # time (build_raw_zip_package_streaming) blend this topic's 0-100%
@@ -773,7 +778,7 @@ class CourseMarkdownConverter:
         # _ensure_expanded - so a folder full of sub-folders is expanded and
         # released one at a time instead of all at once.
         for raw_node in nodes:
-            node = await _ensure_expanded(raw_node, course_id, expand_fn)
+            node = await _ensure_expanded(raw_node, course_id, expand_fn, parent_title)
             processed_count[0] += 1
             within_topic = min(processed_count[0] / max(1, total_nodes), 1.0)
             pct = progress_base + within_topic * progress_span
@@ -831,6 +836,7 @@ class CourseMarkdownConverter:
                         progress_span=progress_span,
                         course_id=course_id,
                         expand_fn=expand_fn,
+                        parent_title=node.get("title", "Untitled"),
                     )
             else:
                 # Raw attachments placed directly into current_dir

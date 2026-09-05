@@ -404,20 +404,22 @@ class BlackboardClient:
         data = resp.json()
         return data.get("results", [])
 
-    async def build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    async def build_content_node(self, course_id: str, item: Dict[str, Any], parent_title: Optional[str] = None) -> Dict[str, Any]:
         """
         Public wrapper for _build_content_node - builds ONE item's own data
         (title, body, attachments, Kaltura resolution) plus its direct
         children as raw, unexpanded API items. Call this again on any child
         to expand one more level, on demand, instead of eagerly recursing
-        through the whole subtree.
+        through the whole subtree. parent_title is used as this item's
+        effective title when Blackboard gives it a generic, non-descriptive
+        one (e.g. Ultra's "ultraDocumentBody" wrapper nodes).
         """
-        return await self._build_content_node(course_id, item)
+        return await self._build_content_node(course_id, item, parent_title)
 
-    async def _build_content_node_deep(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    async def _build_content_node_deep(self, course_id: str, item: Dict[str, Any], parent_title: Optional[str] = None) -> Dict[str, Any]:
         """Fully recursive version of build_content_node - expands every descendant eagerly. Used by get_contents_tree."""
-        node = await self._build_content_node(course_id, item)
-        node["children"] = [await self._build_content_node_deep(course_id, child) for child in node.get("children", [])]
+        node = await self._build_content_node(course_id, item, parent_title)
+        node["children"] = [await self._build_content_node_deep(course_id, child, node["title"]) for child in node.get("children", [])]
         return node
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
@@ -442,7 +444,19 @@ class BlackboardClient:
                 return resp.json()
         return {}
 
-    async def _build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    # Blackboard Ultra wraps a content item's actual HTML body (and any video
+    # embedded in it) in a child node that Blackboard itself titles generically
+    # - "ultraDocumentBody" - rather than anything describing the content.
+    # That title otherwise ends up as the filename for every video/document
+    # inside it ("ultraDocumentBody.mp4" for every single video in the
+    # course), which tells the user nothing. Substituting the parent item's
+    # real title (e.g. "Difference between Diet and Nutrition") fixes the
+    # filename at its one source, so every downstream name derived from it -
+    # the raw-mode folder, the video file, the markdown file - inherits the
+    # fix for free.
+    _GENERIC_ULTRA_TITLES = {"ultradocumentbody"}
+
+    async def _build_content_node(self, course_id: str, item: Dict[str, Any], parent_title: Optional[str] = None) -> Dict[str, Any]:
         import re
         content_id = item.get("id")
 
@@ -455,6 +469,8 @@ class BlackboardClient:
                         item[k] = v
 
         title = item.get("title", "Untitled Content")
+        if title.strip().lower() in self._GENERIC_ULTRA_TITLES and parent_title:
+            title = parent_title
         handler = item.get("contentHandler", {}).get("id", "")
         is_folder = (
             item.get("folder", {}).get("isFolder", False)
