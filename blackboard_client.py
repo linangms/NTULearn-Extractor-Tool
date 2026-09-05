@@ -132,7 +132,14 @@ class BlackboardClient:
             return [f"_{pk}_1"]
         
         if not course_id_str.startswith("_") and not course_id_str.startswith("courseId:"):
-            return [f"_{course_id_str}_1", f"courseId:{course_id_str}"]
+            # Blackboard internal PKs are always purely numeric (e.g. "_560_1"),
+            # so a non-numeric course_id (a course code like "CCE102") can never
+            # resolve as "_CCE102_1" - that candidate is dead weight that always
+            # 404s. courseId:<code> is Blackboard's documented way to reference
+            # a course by its human-readable Course ID, and must come first since
+            # _format_course_id() (used by attachment/content download) just
+            # takes candidates[0] without trying the rest on failure.
+            return [f"courseId:{course_id_str}", f"_{course_id_str}_1"]
         return [course_id_str]
 
     def _format_course_id(self, course_id: str) -> str:
