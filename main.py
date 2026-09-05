@@ -175,6 +175,18 @@ def _verify_lti_launch(id_token: Optional[str], state: Optional[str]) -> Dict[st
             options={"require": ["exp", "iat"]},
         )
     except Exception as e:
+        # Peek at the token's actual (unverified) claims purely to log what
+        # Blackboard really sent, so a mismatch (aud, iss) is diagnosable from
+        # server logs without needing to dig through Blackboard's admin UI.
+        try:
+            unverified = jwt.decode(id_token, options={"verify_signature": False})
+            logger.warning(
+                f"LTI id_token verification failed: {e} | "
+                f"token aud={unverified.get('aud')!r} iss={unverified.get('iss')!r} "
+                f"vs configured LTI_CLIENT_ID={LTI_CLIENT_ID!r} LTI_ISSUER={LTI_ISSUER!r}"
+            )
+        except Exception:
+            logger.warning(f"LTI id_token verification failed: {e} (could not decode token for diagnostics)")
         raise HTTPException(status_code=403, detail=f"LTI id_token verification failed: {e}")
 
     if claims.get("nonce") != state_entry["nonce"]:
