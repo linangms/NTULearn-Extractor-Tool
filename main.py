@@ -2,12 +2,14 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import time
 import urllib.parse
 import uuid
 import logging
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, Response, Form, Query, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -66,137 +68,174 @@ task_storage: Dict[str, Dict[str, Any]] = {}
 BLACKBOARD_BASE_URL = os.environ.get("BLACKBOARD_BASE_URL", "https://ntulearntst.ntu.edu.sg")
 
 
-async def extract_lti_context(request: Request) -> Dict[str, str]:
-    """
-    Extracts LTI claims, course ID, course name, and user role from request payload and referer headers.
-    """
-    import urllib.parse, re
+# --- LTI 1.3 launch verification --------------------------------------------
+# Blackboard Learn's LTI 1.3 platform endpoints are shared across all SaaS
+# tenants - the issuer and OIDC/JWKS URLs below are Blackboard-wide constants,
+# not specific to any one Blackboard instance. Only the client_id (your
+# registered Application ID) and, optionally, deployment_id(s) are
+# institution-specific.
+LTI_ISSUER = "https://blackboard.com"
+LTI_OIDC_AUTH_URL = "https://developer.blackboard.com/api/v1/gateway/oidcauth"
+LTI_CLIENT_ID = os.environ.get("LTI_CLIENT_ID") or os.environ.get("BLACKBOARD_CLIENT_ID")
+LTI_JWKS_URL = os.environ.get("LTI_JWKS_URL") or (
+    f"https://developer.blackboard.com/api/v1/management/applications/{LTI_CLIENT_ID}/jwks.json"
+    if LTI_CLIENT_ID else None
+)
+# Optional allow-list (comma-separated). If unset, deployment_id is logged but not enforced.
+LTI_DEPLOYMENT_IDS = [d.strip() for d in os.environ.get("LTI_DEPLOYMENT_IDS", "").split(",") if d.strip()]
 
-    params = {}
-    raw_url = str(request.url)
-    unquoted_url = urllib.parse.unquote(urllib.parse.unquote(raw_url))
+_LTI_STATE_TTL_SECONDS = 600
+_lti_states: Dict[str, Dict[str, Any]] = {}
+_lti_jwks_client = None
 
-    # Parse query parameters with double URL unquoting
-    for k, v in request.query_params.items():
-        params[k] = v
-        k_un = urllib.parse.unquote(urllib.parse.unquote(k))
-        v_un = urllib.parse.unquote(urllib.parse.unquote(v))
-        params[k_un] = v_un
 
-    form_data = {}
-    if request.method == "POST":
-        try:
-            form = await request.form()
-            form_data = dict(form)
-            params.update(form_data)
-        except Exception as e:
-            logger.debug(f"Could not parse form: {e}")
+def _cleanup_lti_states() -> None:
+    now = time.time()
+    for state, entry in list(_lti_states.items()):
+        if now - entry["created_at"] > _LTI_STATE_TTL_SECONDS:
+            _lti_states.pop(state, None)
 
-    # Fallback regex extraction from raw unquoted URL string (handles course_id%253D_626_1 or course_id=_626_1)
-    m_course = (
-        re.search(r'\bcourse_id(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'\bcustom_course_id(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'\bcourse(?!_title|_name)[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-    )
-    if m_course and "course_id" not in params:
-        params["course_id"] = m_course.group(1)
 
-    id_token = params.get("id_token") or form_data.get("id_token")
-    
-    # 1. Case-insensitive dictionary inspection of all query and form parameters
-    params_lower = {str(k).lower(): str(v) for k, v in params.items() if v}
-    
+def _get_lti_jwks_client():
+    """Lazily creates (and caches) the PyJWT client for Blackboard's platform JWKS."""
+    global _lti_jwks_client
+    if _lti_jwks_client is None and LTI_JWKS_URL:
+        import jwt
+        _lti_jwks_client = jwt.PyJWKClient(LTI_JWKS_URL)
+    return _lti_jwks_client
+
+
+def _extract_course_info_from_claims(claims: Dict[str, Any]) -> Dict[str, str]:
+    """Derives course_id/course_name/user_role strictly from verified LTI claims."""
+    context_claim = claims.get("https://purl.imsglobal.org/spec/lti/claim/context", {}) or {}
+    custom_claim = claims.get("https://purl.imsglobal.org/spec/lti/claim/custom", {}) or {}
+    lis_claim = claims.get("https://purl.imsglobal.org/spec/lti/claim/lis", {}) or {}
+    roles_claim = claims.get("https://purl.imsglobal.org/spec/lti/claim/roles", []) or []
+
     course_id = (
-        params_lower.get("course_id") 
-        or params_lower.get("courseid")
-        or params_lower.get("course")
-        or params_lower.get("custom_course_id")
-        or params_lower.get("ext_course_id")
-        or params_lower.get("ext_lms_course_id")
-        or params_lower.get("context_id") 
+        custom_claim.get("course_id")
+        or custom_claim.get("course_code")
+        or custom_claim.get("courseid")
+        or custom_claim.get("context_label")
+        or custom_claim.get("CourseSection.id")
+        or lis_claim.get("course_offering_sourcedid")
+        or lis_claim.get("course_section_sourcedid")
+        or context_claim.get("label")
+        or context_claim.get("id")
     )
     course_name = (
-        params_lower.get("course_name")
-        or params_lower.get("course_title")
-        or params_lower.get("coursetitle")
-        or params_lower.get("coursename")
-        or params_lower.get("context_title")
-        or params_lower.get("custom_course_name")
-        or params_lower.get("custom_course_title")
-        or params_lower.get("custom_course_code")
-        or params_lower.get("custom_context_title")
-        or params_lower.get("custom_context_label")
-        or params_lower.get("context_label")
-        or params_lower.get("lis_course_offering_sourcedid")
-        or params_lower.get("lis_course_section_sourcedid")
-        or params_lower.get("title")
+        context_claim.get("title")
+        or context_claim.get("label")
+        or custom_claim.get("course_name")
+        or custom_claim.get("course_code")
+        or custom_claim.get("course_title")
+        or custom_claim.get("context_title")
     )
-    user_role = "Instructor"
+    user_role = "Instructor" if any(
+        "Instructor" in r or "Administrator" in r or "ContentDeveloper" in r for r in roles_claim
+    ) else "Student"
 
-    # 2. Decode LTI 1.3 JWT ID Token if present
-    if id_token:
-        try:
-            import jwt
-            decoded = jwt.decode(id_token, options={"verify_signature": False})
-            logger.info(f"Decoded LTI ID Token claims: {decoded}")
+    course_id = clean_course_id_string(str(course_id)) if course_id else ""
+    if not course_name:
+        course_name = course_id or "Course Materials Extractor"
 
-            context_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
-            custom_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/custom", {})
-            lis_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/lis", {})
-            roles_claim = decoded.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
+    return {"course_id": course_id, "course_name": str(course_name), "user_role": user_role}
 
-            c_id = (
-                custom_claim.get("course_id") 
-                or custom_claim.get("course_code")
-                or custom_claim.get("courseid")
-                or custom_claim.get("context_label")
-                or custom_claim.get("CourseSection.id")
-                or lis_claim.get("course_offering_sourcedid")
-                or lis_claim.get("course_section_sourcedid")
-                or context_claim.get("label") 
-                or context_claim.get("id") 
-            )
-            c_name = (
-                context_claim.get("title") 
-                or context_claim.get("label") 
-                or custom_claim.get("course_name") 
-                or custom_claim.get("course_code")
-                or custom_claim.get("course_title")
-                or custom_claim.get("context_title")
-                or custom_claim.get("context_label")
-                or custom_claim.get("custom_course_code")
-                or custom_claim.get("custom_course_name")
-                or lis_claim.get("course_offering_sourcedid")
-                or lis_claim.get("course_section_sourcedid")
-            )
 
-            if c_id:
-                course_id = str(c_id)
-            if c_name:
-                course_name = str(c_name)
+def _verify_lti_launch(id_token: Optional[str], state: Optional[str]) -> Dict[str, Any]:
+    """
+    Verifies a Blackboard LTI 1.3 id_token: signature (via Blackboard's platform
+    JWKS), issuer, audience, expiry, and nonce (tied to the state issued during
+    /lti/login). Raises HTTPException on any failure - callers must never trust
+    an unverified token's claims.
+    """
+    import jwt
 
-            if roles_claim:
-                if any("Instructor" in r or "Administrator" in r or "ContentDeveloper" in r for r in roles_claim):
-                    user_role = "Instructor"
-                else:
-                    user_role = "Student"
-        except Exception as e:
-            logger.warning(f"Error decoding id_token: {e}")
+    if not id_token:
+        raise HTTPException(status_code=403, detail="Missing id_token - launch must go through /lti/login")
+    if not state or state not in _lti_states:
+        raise HTTPException(status_code=403, detail="Invalid or expired LTI login state - launch must start from /lti/login")
 
-    # 3. Inspect HTTP Referer header or Request URL if course_id is missing or default
-    referer = request.headers.get("referer", "") or str(request.url)
-    unquoted_referer = urllib.parse.unquote(urllib.parse.unquote(referer))
-    if not course_id:
-        match = (
-            re.search(r'/courses/([^/?]+)', unquoted_referer)
-            or re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
-            or re.search(r'courseId[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
-            or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_referer, re.IGNORECASE)
+    state_entry = _lti_states.pop(state)
+    if time.time() - state_entry["created_at"] > _LTI_STATE_TTL_SECONDS:
+        raise HTTPException(status_code=403, detail="LTI login state expired")
+
+    jwks_client = _get_lti_jwks_client()
+    if not jwks_client:
+        raise HTTPException(status_code=500, detail="LTI verification not configured - set LTI_CLIENT_ID (or BLACKBOARD_CLIENT_ID)")
+
+    try:
+        signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=LTI_CLIENT_ID,
+            issuer=LTI_ISSUER,
+            options={"require": ["exp", "iat"]},
         )
-        if match:
-            extracted = match.group(1)
-            logger.info(f"Extracted course_id '{extracted}' from Referer/URL: {referer}")
-            course_id = extracted
+    except Exception as e:
+        raise HTTPException(status_code=403, detail=f"LTI id_token verification failed: {e}")
+
+    if claims.get("nonce") != state_entry["nonce"]:
+        raise HTTPException(status_code=403, detail="LTI id_token nonce mismatch")
+
+    message_type = claims.get("https://purl.imsglobal.org/spec/lti/claim/message_type")
+    if message_type not in ("LtiResourceLinkRequest", "LtiDeepLinkingRequest"):
+        raise HTTPException(status_code=403, detail=f"Unexpected LTI message_type: {message_type}")
+
+    deployment_id = claims.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id")
+    if LTI_DEPLOYMENT_IDS:
+        if deployment_id not in LTI_DEPLOYMENT_IDS:
+            raise HTTPException(status_code=403, detail=f"Unrecognized LTI deployment_id: {deployment_id}")
+    else:
+        logger.warning(f"LTI_DEPLOYMENT_IDS not configured - accepting deployment_id={deployment_id} without an allow-list check")
+
+    return claims
+
+
+_tool_rsa_private_key = None
+_tool_jwk_cache: Optional[Dict[str, Any]] = None
+
+
+def _get_tool_jwk() -> Optional[Dict[str, Any]]:
+    """
+    Generates (once, in memory) an RSA keypair for this tool and returns its
+    public key as a JWK dict, served at /lti/jwks. Not persisted across
+    restarts - fine since nothing here currently signs outgoing requests with
+    it (no AGS/NRPS/Deep Linking calls); regenerating on restart is invisible
+    to Blackboard, which only ever verifies our launch-independent JWKS if it
+    decides to call back into a signed service, which this app doesn't use yet.
+    """
+    global _tool_rsa_private_key, _tool_jwk_cache
+    if _tool_jwk_cache is not None:
+        return _tool_jwk_cache
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import base64
+
+        if _tool_rsa_private_key is None:
+            _tool_rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        public_numbers = _tool_rsa_private_key.public_key().public_numbers()
+
+        def _b64url_uint(value: int) -> str:
+            byte_length = (value.bit_length() + 7) // 8 or 1
+            return base64.urlsafe_b64encode(value.to_bytes(byte_length, "big")).rstrip(b"=").decode("ascii")
+
+        _tool_jwk_cache = {
+            "kty": "RSA",
+            "use": "sig",
+            "alg": "RS256",
+            "kid": "ntulearn-extractor-1",
+            "n": _b64url_uint(public_numbers.n),
+            "e": _b64url_uint(public_numbers.e),
+        }
+    except Exception as e:
+        logger.warning(f"Could not generate tool JWKS keypair: {e}")
+        _tool_jwk_cache = None
+    return _tool_jwk_cache
+
 
 def clean_course_id_string(val: str) -> str:
     if not val:
@@ -214,9 +253,16 @@ def clean_course_id_string(val: str) -> str:
     return first_part
 
 
-async def extract_lti_context(request: Request) -> Dict[str, str]:
+async def extract_lti_context(request: Request, require_verified: bool = False) -> Dict[str, str]:
     """
     Extracts LTI claims, course ID, course name, and user role from request payload and referer headers.
+
+    require_verified=True (used by the actual /lti/launch handshake) requires a
+    valid, signature-verified id_token tied to a state issued by /lti/login, and
+    derives course_id/course_name/user_role strictly from those verified claims -
+    no fallback to unauthenticated URL/referer heuristics. require_verified=False
+    (used for cosmetic page rendering, e.g. the dashboard on a plain reload) keeps
+    the lenient best-effort heuristics below, since it is not a security boundary.
     """
     import urllib.parse, re
 
@@ -240,6 +286,15 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
         except Exception as e:
             logger.debug(f"Could not parse form: {e}")
 
+    id_token = params.get("id_token") or form_data.get("id_token")
+
+    if require_verified:
+        state = params.get("state") or form_data.get("state")
+        claims = _verify_lti_launch(id_token, state)
+        deployment_id = claims.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id")
+        logger.info(f"Verified LTI launch: deployment_id={deployment_id}")
+        return _extract_course_info_from_claims(claims)
+
     # Fallback regex extraction from raw unquoted URL string (handles course_id%253D_626_1 or course_id=_626_1)
     m_course = (
         re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
@@ -249,8 +304,6 @@ async def extract_lti_context(request: Request) -> Dict[str, str]:
     if m_course and "course_id" not in params:
         params["course_id"] = m_course.group(1)
 
-    id_token = params.get("id_token") or form_data.get("id_token")
-    
     # 1. Case-insensitive dictionary inspection of all query and form parameters
     params_lower = {str(k).lower(): str(v) for k, v in params.items() if v}
     
@@ -433,88 +486,67 @@ async def api_course_details(course_id: str = Query(...)):
 @app.api_route("/lti/login", methods=["GET", "POST"])
 async def lti_login(request: Request):
     """
-    LTI 1.3 OIDC login initiation route.
+    LTI 1.3 OIDC third-party initiated login. Redirects the browser to
+    Blackboard's OIDC authorization endpoint per the LTI 1.3 / OIDC Core spec,
+    with a freshly generated state+nonce that /lti/launch will require and
+    verify - this is what makes the subsequent id_token verification meaningful,
+    instead of the tool simply re-posting straight to itself.
     """
-    import urllib.parse, re
-
-    params = {}
-    raw_url = str(request.url)
-    unquoted_url = urllib.parse.unquote(urllib.parse.unquote(raw_url))
-
-    for k, v in request.query_params.items():
-        params[k] = v
-        k_un = urllib.parse.unquote(urllib.parse.unquote(k))
-        v_un = urllib.parse.unquote(urllib.parse.unquote(v))
-        params[k_un] = v_un
-
+    params = dict(request.query_params)
     if request.method == "POST":
         try:
-            form_data = await request.form()
-            for k, v in form_data.items():
-                params[str(k)] = str(v)
+            form = await request.form()
+            params.update({k: str(v) for k, v in form.items()})
         except Exception as e:
             logger.warning(f"Error parsing login form data: {e}")
 
-    # Fallback regex extraction from raw unquoted URL (handles course_id%253D_626_1%2C...)
-    m_course = (
-        re.search(r'course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'custom_course_id[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-        or re.search(r'course[=:=%253D%3D]+([^&?\s]+)', unquoted_url, re.IGNORECASE)
-    )
-    if m_course and "course_id" not in params:
-        params["course_id"] = m_course.group(1)
-
     iss = params.get("iss")
-    target_link_uri = params.get("target_link_uri") or str(request.url_for("lti_launch"))
-    if "onrender.com" in target_link_uri or request.headers.get("x-forwarded-proto") == "https":
-        target_link_uri = target_link_uri.replace("http://", "https://", 1)
-    client_id = params.get("client_id")
     login_hint = params.get("login_hint")
+    target_link_uri = params.get("target_link_uri") or str(request.url_for("lti_launch"))
+    if request.headers.get("x-forwarded-proto") == "https":
+        target_link_uri = target_link_uri.replace("http://", "https://", 1)
+    client_id = params.get("client_id") or LTI_CLIENT_ID
+    lti_message_hint = params.get("lti_message_hint")
 
-    # Clean course_id if present in params
-    if "course_id" in params:
-        params["course_id"] = clean_course_id_string(params["course_id"])
+    if iss != LTI_ISSUER:
+        logger.warning(f"LTI login rejected: unexpected issuer '{iss}'")
+        raise HTTPException(status_code=400, detail="Unrecognized LTI platform issuer")
+    if not login_hint:
+        raise HTTPException(status_code=400, detail="Missing login_hint")
 
-    logger.info(f"LTI Login initiated with params={params}")
+    _cleanup_lti_states()
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    _lti_states[state] = {"nonce": nonce, "target_link_uri": target_link_uri, "created_at": time.time()}
 
-    hidden_inputs = ""
-    for k, v in params.items():
-        if k not in ["iss", "client_id"]:
-            val = str(v) if v is not None else ""
-            hidden_inputs += f'<input type="hidden" name="{k}" value="{val}" />\n'
+    auth_params = {
+        "scope": "openid",
+        "response_type": "id_token",
+        "response_mode": "form_post",
+        "prompt": "none",
+        "client_id": client_id,
+        "redirect_uri": target_link_uri,
+        "login_hint": login_hint,
+        "state": state,
+        "nonce": nonce,
+    }
+    if lti_message_hint:
+        auth_params["lti_message_hint"] = lti_message_hint
 
-    if iss and login_hint:
-        response_html = f"""
-        <html>
-        <body>
-            <p>Launching LTI Tool...</p>
-            <form id="lti_launch_form" action="{target_link_uri}" method="POST">
-                <input type="hidden" name="iss" value="{iss or ''}" />
-                <input type="hidden" name="client_id" value="{client_id or ''}" />
-                {hidden_inputs}
-            </form>
-            <script>document.getElementById('lti_launch_form').submit();</script>
-        </body>
-        </html>
-        """
-        return HTMLResponse(content=response_html)
-
-    # If simple redirect without OIDC state, forward course_id in target_link_uri
-    if "course_id" in params and params["course_id"] and "course_id" not in target_link_uri:
-        delim = "&" if "?" in target_link_uri else "?"
-        target_link_uri += f"{delim}course_id={urllib.parse.quote(params['course_id'])}"
-
-    return HTMLResponse(content=f"<html><body><p>Redirecting...</p><script>window.location.href='{target_link_uri}';</script></body></html>")
+    logger.info(f"LTI OIDC login: redirecting to platform auth endpoint for client_id={client_id}")
+    redirect_url = f"{LTI_OIDC_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
+    return RedirectResponse(redirect_url, status_code=302)
 
 
 @app.api_route("/lti/launch", methods=["GET", "POST"])
 async def lti_launch(request: Request):
     """
-    LTI 1.3 Launch handler endpoint.
-    Extracts course details and user roles from LTI payload.
+    LTI 1.3 Launch handler endpoint. Verifies the platform-signed id_token
+    (signature, issuer, audience, nonce, deployment_id) before trusting any of
+    its claims - see extract_lti_context(require_verified=True).
     """
     session_id = str(uuid.uuid4())
-    context = await extract_lti_context(request)
+    context = await extract_lti_context(request, require_verified=True)
 
     course_id = context["course_id"]
     course_name = context["course_name"]
@@ -524,6 +556,7 @@ async def lti_launch(request: Request):
         "course_id": course_id,
         "course_name": course_name,
         "user_role": user_role,
+        "created_at": time.time(),
     }
 
     return templates.TemplateResponse(
@@ -541,9 +574,13 @@ async def lti_launch(request: Request):
 @app.get("/lti/jwks")
 async def lti_jwks():
     """
-    LTI 1.3 JWKS public keys endpoint.
+    LTI 1.3 JWKS public keys endpoint. Publishes this tool's own public key -
+    not used to verify incoming Blackboard launches (those are verified against
+    Blackboard's own platform JWKS), but required by the LTI 1.3 spec for any
+    future signed service calls (e.g. Deep Linking, AGS) the tool might make.
     """
-    return {"keys": []}
+    jwk_client = _get_tool_jwk()
+    return {"keys": [jwk_client]} if jwk_client else {"keys": []}
 
 
 @app.get("/api/test-auth")
@@ -592,14 +629,26 @@ async def test_blackboard_auth():
 
 @app.get("/api/extract/stream")
 async def extract_course_stream(
-    course_id: str = Query("CCE102-TST"),
-    course_title: Optional[str] = Query(None),
+    session_id: str = Query(...),
     mode: str = Query("markdown"),
-    mock: bool = Query(False)
+    mock: bool = Query(False),
 ):
     """
     Server-Sent Events (SSE) endpoint to stream live extraction progress.
+
+    Requires a session_id created by a verified LTI launch (/lti/launch).
+    course_id is resolved from that server-side session, never accepted
+    directly from the client - otherwise anyone with this URL could extract
+    any course's content just by supplying its course_id, bypassing Blackboard
+    and LTI entirely (this app authenticates to Blackboard's REST API with its
+    own service credentials, not the visiting user's own permissions).
     """
+    session_data = sessions.get(session_id)
+    if not session_data or not session_data.get("course_id"):
+        raise HTTPException(status_code=403, detail="Invalid or expired session - please relaunch the tool from Blackboard")
+
+    course_id = session_data["course_id"]
+    course_title = session_data.get("course_name")
     task_id = str(uuid.uuid4())
 
     async def event_generator():

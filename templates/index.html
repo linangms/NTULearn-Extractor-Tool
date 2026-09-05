@@ -47,6 +47,7 @@
 
         <!-- Course Information Card -->
         <section class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-6">
+            <input type="hidden" id="lti-session-id" value="{{ session_id }}">
             <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div>
                     <div class="flex items-center space-x-2 text-xs font-semibold uppercase tracking-wider text-ntuRed mb-1">
@@ -215,6 +216,12 @@
         }
 
         function startExtraction(mode = "markdown") {
+            const sessionId = document.getElementById("lti-session-id").value.trim();
+            if (!sessionId) {
+                logToTerminal(`<span class='text-red-400'>No active LTI session - please relaunch this tool from Blackboard and try again.</span>`);
+                return;
+            }
+
             const extractBtn = document.getElementById("extract-btn");
             const extractRawBtn = document.getElementById("extract-raw-btn");
             const downloadBtn = document.getElementById("download-btn");
@@ -242,9 +249,7 @@
             logToTerminal(`<span class='text-amber-400'>Starting extraction task (${modeLabel})...</span>`);
             updateStageUI(1);
 
-            const courseId = document.getElementById("course-id").innerText.trim();
-            const courseTitle = document.getElementById("course-title").innerText.trim();
-            const sseUrl = `/api/extract/stream?course_id=${encodeURIComponent(courseId)}&course_title=${encodeURIComponent(courseTitle)}&mode=${encodeURIComponent(mode)}`;
+            const sseUrl = `/api/extract/stream?session_id=${encodeURIComponent(sessionId)}&mode=${encodeURIComponent(mode)}`;
 
             if (eventSource) {
                 eventSource.close();
