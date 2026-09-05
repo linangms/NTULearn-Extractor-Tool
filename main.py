@@ -698,8 +698,21 @@ async def extract_course_stream(
                         details = await bb_client.get_course_details(course_id)
                         if details:
                             display_title = details.get("courseId") or details.get("name") or display_title
-                        tree = await bb_client.get_contents_tree(course_id)
-                        yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
+                        # Just the shallow topic list here (cheap) - each topic's
+                        # full subtree (all its body HTML, attachments, etc.) is
+                        # fetched one at a time inside topics_source() below, as
+                        # it's processed, instead of holding every topic for the
+                        # whole course in memory for the whole extraction.
+                        top_items = await bb_client.get_top_level_items(course_id)
+                    total_topics = len(top_items)
+
+                    async def topics_source():
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as topic_client:
+                            await topic_client.authenticate()
+                            for item in top_items:
+                                yield await topic_client.build_content_node(course_id, item)
+
+                    yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
                 except Exception as api_err:
                     # Logged with full detail server-side only - never echoed to the
                     # client or, worse, baked into the mock package the user downloads,
@@ -734,6 +747,11 @@ async def extract_course_stream(
                             ]
                         }
                     ]
+                    total_topics = len(tree)
+
+                    async def topics_source():
+                        for node in tree:
+                            yield node
             else:
                 # Dynamic content tree matching the launched course ID and Title
                 yield f"data: {json.dumps({'stage': 1, 'progress': 25, 'message': f'Parsing content hierarchy for {course_id}...', 'status': 'running'})}\n\n"
@@ -793,6 +811,11 @@ async def extract_course_stream(
                         ]
                     }
                 ]
+                total_topics = len(tree)
+
+                async def topics_source():
+                    for node in tree:
+                        yield node
 
             yield f"data: {json.dumps({'stage': 2, 'progress': 50, 'message': f'Content tree parsed for {course_id}. Downloading attachments...', 'status': 'running'})}\n\n"
             await asyncio.sleep(0.5)
@@ -880,8 +903,9 @@ async def extract_course_stream(
             async def run_packaging():
                 try:
                     if mode == "raw":
-                        res = await converter.build_raw_zip_package(
-                            content_tree=tree,
+                        res = await converter.build_raw_zip_package_streaming(
+                            topics=topics_source(),
+                            total_topics=total_topics,
                             attachment_downloader=downloader_func,
                             caption_downloader=caption_downloader_func,
                             embed_url_resolver=embed_url_resolver_func,
@@ -889,8 +913,9 @@ async def extract_course_stream(
                             progress_callback=progress_cb,
                         )
                     else:
-                        res = await converter.build_zip_package(
-                            content_tree=tree,
+                        res = await converter.build_zip_package_streaming(
+                            topics=topics_source(),
+                            total_topics=total_topics,
                             attachment_downloader=downloader_func,
                             caption_downloader=caption_downloader_func,
                             progress_callback=progress_cb,

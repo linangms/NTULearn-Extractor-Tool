@@ -243,6 +243,121 @@ class CourseMarkdownConverter:
                 node_copy["folder_path"] = folder_path
                 flat_list.append(node_copy)
 
+    def _build_readme(self, index_entries: List[Tuple[str, str, str]]) -> str:
+        """index_entries: list of (title, folder_path, filename) - cheap metadata only."""
+        readme_content = f"# {self.course_name}\n\n"
+        readme_content += f"**Course ID:** {self.course_id}\n\n"
+        readme_content += "Extracted & converted to Markdown via **NTULearn Extractor Tool**.\n\n"
+        readme_content += "## Course Content Index\n\n"
+        for title, folder_path, filename in index_entries:
+            mod_path = f"*(Module: `{folder_path}`)* " if folder_path else ""
+            readme_content += f"- [{title}]({filename}) {mod_path}\n"
+        return readme_content
+
+    async def _write_markdown_item(
+        self,
+        item: Dict[str, Any],
+        idx: int,
+        out_folder: str,
+        zf: zipfile.ZipFile,
+        attachment_downloader: Optional[Callable],
+        caption_downloader: Optional[Callable],
+        progress_callback: Optional[Callable],
+        pct: float,
+    ) -> Tuple[str, str, str]:
+        """
+        Converts one content-tree item to a Markdown file inside the
+        already-open zip, handling its attachments/captions/video-transcript
+        fallback. Returns (filename, title, folder_path) - the lightweight
+        tuple needed for the course-level README index, so a caller doesn't
+        need to hold onto the item's heavy body text after this returns.
+        """
+        clean_title = sanitize_filename(item.get("title", f"Item_{idx}"))
+        filename = f"{idx:02d}_{clean_title}.md"
+        file_path = f"{out_folder}/{filename}"
+
+        if progress_callback:
+            await progress_callback(f"Converting Markdown for: {item.get('title')}", pct)
+
+        attachments_dir = f"{out_folder}/attachments"
+        attachment_map, doc_text_map = await self._handle_attachments(
+            item, attachments_dir, zf, attachment_downloader,
+            caption_downloader=caption_downloader, progress_callback=progress_callback, pct=pct,
+        )
+
+        body = (
+            item.get("body")
+            or item.get("description")
+            or item.get("instructions")
+            or item.get("summary")
+            or item.get("formattedBody")
+            or ""
+        )
+
+        handler = item.get("contentHandler", {})
+        handler_id = handler.get("id", "") if isinstance(handler, dict) else str(handler)
+        is_video_item = (
+            "video" in handler_id.lower()
+            or "kaltura" in handler_id.lower()
+            or "panopto" in handler_id.lower()
+            or "media" in handler_id.lower()
+            or any(ext in body.lower() for ext in [".mp4", ".mov", ".m4v", ".webm"])
+        )
+
+        # If this is a video item, try to fetch its real Kaltura captions first;
+        # only fall back to the description text as a transcript if none exist.
+        if is_video_item:
+            clean_item_title = sanitize_filename(item.get("title", "Video"))
+            txt_filename = f"{clean_item_title}_transcript.txt"
+            if txt_filename not in doc_text_map:
+                real_transcript_saved = False
+                if caption_downloader:
+                    search_text = body + " " + " ".join(
+                        f"{att.get('originalUrl') or ''} {att.get('downloadUrl') or ''}"
+                        for att in item.get("attachments", [])
+                    )
+                    if _looks_like_kaltura_attachment(search_text, {}):
+                        try:
+                            cap_data = await caption_downloader(self.course_id, item.get("id"), search_text)
+                            if cap_data:
+                                self._save_caption_and_transcript(item, cap_data, "captions.srt", zf, out_folder, doc_text_map)
+                                real_transcript_saved = True
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch Kaltura captions for {clean_item_title}: {e}")
+
+                if not real_transcript_saved:
+                    clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
+                    if clean_body_text and len(clean_body_text) > 10:
+                        zf.writestr(f"{out_folder}/{txt_filename}", clean_body_text)
+                        doc_text_map[txt_filename] = clean_body_text
+
+        md_text = self.convert_html_to_markdown(body, attachment_map)
+
+        full_md = f"# {item.get('title')}\n\n"
+        if item.get("folder_path"):
+            full_md += f"**Module / Path:** `{item.get('folder_path')}`\n\n"
+
+        if md_text and md_text.strip():
+            full_md += f"{md_text.strip()}\n\n"
+
+        # Append text extracted directly from attached PDF / PPTX / DOCX / TXT / Video Transcripts!
+        if doc_text_map:
+            for att_file, doc_text in doc_text_map.items():
+                section_heading = "Video Transcript" if "transcript" in att_file.lower() or att_file.endswith(".txt") else "Extracted Content from Document"
+                full_md += f"## {section_heading} (`{att_file}`)\n\n"
+                full_md += f"{doc_text}\n\n"
+
+        if item.get("attachments"):
+            full_md += "### Attached Files & Resources\n\n"
+            for att in item["attachments"]:
+                att_name = sanitize_filename(att.get("fileName", "attachment"))
+                rel_link = f"./attachments/{att_name}"
+                full_md += f"- 📎 [{att.get('fileName', 'attachment')}]({rel_link})\n"
+
+        zf.writestr(file_path, full_md)
+
+        return filename, item.get("title"), item.get("folder_path")
+
     async def build_zip_package(
         self,
         content_tree: List[Dict[str, Any]],
@@ -265,105 +380,63 @@ class CourseMarkdownConverter:
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             out_folder = self.root_folder_name
-
-            readme_content = f"# {self.course_name}\n\n"
-            readme_content += f"**Course ID:** {self.course_id}\n\n"
-            readme_content += "Extracted & converted to Markdown via **NTULearn Extractor Tool**.\n\n"
-            readme_content += "## Course Content Index\n\n"
+            index_entries = []
 
             for idx, item in enumerate(flat_items, 1):
-                clean_title = sanitize_filename(item.get("title", f"Item_{idx}"))
-                filename = f"{idx:02d}_{clean_title}.md"
-                mod_path = f"*(Module: `{item.get('folder_path')}`)* " if item.get("folder_path") else ""
-                readme_content += f"- [{item.get('title')}]({filename}) {mod_path}\n"
-
-            zf.writestr(f"{out_folder}/00_README.md", readme_content)
-
-            for idx, item in enumerate(flat_items, 1):
-                clean_title = sanitize_filename(item.get("title", f"Item_{idx}"))
-                filename = f"{idx:02d}_{clean_title}.md"
-                file_path = f"{out_folder}/{filename}"
-
                 pct = (idx / max(1, total_nodes)) * 100
-                if progress_callback:
-                    await progress_callback(f"Converting Markdown for: {item.get('title')}", pct)
-
-                attachments_dir = f"{out_folder}/attachments"
-                attachment_map, doc_text_map = await self._handle_attachments(
-                    item, attachments_dir, zf, attachment_downloader,
-                    caption_downloader=caption_downloader, progress_callback=progress_callback, pct=pct,
+                filename, title, folder_path = await self._write_markdown_item(
+                    item, idx, out_folder, zf, attachment_downloader, caption_downloader, progress_callback, pct
                 )
+                index_entries.append((title, folder_path, filename))
 
-                body = (
-                    item.get("body")
-                    or item.get("description")
-                    or item.get("instructions")
-                    or item.get("summary")
-                    or item.get("formattedBody")
-                    or ""
-                )
+            zf.writestr(f"{out_folder}/00_README.md", self._build_readme(index_entries))
 
-                handler = item.get("contentHandler", {})
-                handler_id = handler.get("id", "") if isinstance(handler, dict) else str(handler)
-                is_video_item = (
-                    "video" in handler_id.lower()
-                    or "kaltura" in handler_id.lower()
-                    or "panopto" in handler_id.lower()
-                    or "media" in handler_id.lower()
-                    or any(ext in body.lower() for ext in [".mp4", ".mov", ".m4v", ".webm"])
-                )
+        return zip_path
 
-                # If this is a video item, try to fetch its real Kaltura captions first;
-                # only fall back to the description text as a transcript if none exist.
-                if is_video_item:
-                    clean_item_title = sanitize_filename(item.get("title", "Video"))
-                    txt_filename = f"{clean_item_title}_transcript.txt"
-                    if txt_filename not in doc_text_map:
-                        real_transcript_saved = False
-                        if caption_downloader:
-                            search_text = body + " " + " ".join(
-                                f"{att.get('originalUrl') or ''} {att.get('downloadUrl') or ''}"
-                                for att in item.get("attachments", [])
-                            )
-                            if _looks_like_kaltura_attachment(search_text, {}):
-                                try:
-                                    cap_data = await caption_downloader(self.course_id, item.get("id"), search_text)
-                                    if cap_data:
-                                        self._save_caption_and_transcript(item, cap_data, "captions.srt", zf, out_folder, doc_text_map)
-                                        real_transcript_saved = True
-                                except Exception as e:
-                                    logger.warning(f"Failed to fetch Kaltura captions for {clean_item_title}: {e}")
+    async def build_zip_package_streaming(
+        self,
+        topics,
+        total_topics: int,
+        attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        progress_callback: Optional[Callable[[str, float], Any]] = None,
+    ) -> str:
+        """
+        Same output as build_zip_package, but `topics` is an async iterator
+        that yields one top-level topic node at a time instead of a
+        pre-built list of the whole course. Each topic (and its heavy body
+        HTML) is processed and written to the zip, then released before the
+        next topic is fetched - this is what keeps a large, multi-topic
+        course from steadily growing the process's memory footprint over a
+        long-running extraction, instead of holding every topic in memory
+        for the whole run.
+        """
+        fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        out_folder = self.root_folder_name
+        index_entries = []
+        idx = 0
 
-                        if not real_transcript_saved:
-                            clean_body_text = BeautifulSoup(body, "html.parser").get_text(separator="\n\n", strip=True) if body else ""
-                            if clean_body_text and len(clean_body_text) > 10:
-                                zf.writestr(f"{out_folder}/{txt_filename}", clean_body_text)
-                                doc_text_map[txt_filename] = clean_body_text
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            topic_num = 0
+            async for top_node in topics:
+                topic_num += 1
+                flat_items = []
+                self._flatten_tree([top_node], flat_items)
+                topic_item_count = len(flat_items)
 
-                md_text = self.convert_html_to_markdown(body, attachment_map)
+                for i, item in enumerate(flat_items):
+                    idx += 1
+                    within_topic = (i + 1) / max(1, topic_item_count)
+                    pct = ((topic_num - 1 + within_topic) / max(1, total_topics)) * 100
+                    filename, title, folder_path = await self._write_markdown_item(
+                        item, idx, out_folder, zf, attachment_downloader, caption_downloader, progress_callback, pct
+                    )
+                    index_entries.append((title, folder_path, filename))
+                # top_node/flat_items fall out of scope here, freeing this
+                # topic's body text before the next topic is fetched.
 
-                full_md = f"# {item.get('title')}\n\n"
-                if item.get("folder_path"):
-                    full_md += f"**Module / Path:** `{item.get('folder_path')}`\n\n"
-
-                if md_text and md_text.strip():
-                    full_md += f"{md_text.strip()}\n\n"
-
-                # Append text extracted directly from attached PDF / PPTX / DOCX / TXT / Video Transcripts!
-                if doc_text_map:
-                    for att_file, doc_text in doc_text_map.items():
-                        section_heading = "Video Transcript" if "transcript" in att_file.lower() or att_file.endswith(".txt") else "Extracted Content from Document"
-                        full_md += f"## {section_heading} (`{att_file}`)\n\n"
-                        full_md += f"{doc_text}\n\n"
-
-                if item.get("attachments"):
-                    full_md += "### Attached Files & Resources\n\n"
-                    for att in item["attachments"]:
-                        att_name = sanitize_filename(att.get("fileName", "attachment"))
-                        rel_link = f"./attachments/{att_name}"
-                        full_md += f"- 📎 [{att.get('fileName', 'attachment')}]({rel_link})\n"
-
-                zf.writestr(file_path, full_md)
+            zf.writestr(f"{out_folder}/00_README.md", self._build_readme(index_entries))
 
         return zip_path
 
@@ -541,6 +614,53 @@ class CourseMarkdownConverter:
 
         return zip_path
 
+    async def build_raw_zip_package_streaming(
+        self,
+        topics,
+        total_topics: int,
+        attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
+        embed_url_resolver: Optional[Callable[[str], Any]] = None,
+        video_downloader: Optional[Callable[[str], Any]] = None,
+        progress_callback: Optional[Callable[[str, float], Any]] = None,
+    ) -> str:
+        """
+        Same output as build_raw_zip_package, but `topics` is an async
+        iterator that yields one top-level topic node at a time instead of
+        a pre-built list of the whole course. Each topic is fetched,
+        written into the zip, and released before the next one is fetched -
+        see build_zip_package_streaming for why that matters on a large,
+        multi-topic course.
+        """
+        fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        safe_name = sanitize_filename(self.clean_course_name)
+        root_dir = f"{safe_name}_RawFiles"
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            topic_num = 0
+            async for top_node in topics:
+                topic_num += 1
+                topic_node_count = self._count_nodes([top_node])
+                await self._process_raw_node_list(
+                    nodes=[top_node],
+                    current_dir=root_dir,
+                    zf=zf,
+                    attachment_downloader=attachment_downloader,
+                    caption_downloader=caption_downloader,
+                    embed_url_resolver=embed_url_resolver,
+                    video_downloader=video_downloader,
+                    progress_callback=progress_callback,
+                    processed_count=[0],
+                    total_nodes=topic_node_count,
+                    progress_base=((topic_num - 1) / max(1, total_topics)) * 100,
+                    progress_span=(1 / max(1, total_topics)) * 100,
+                )
+                # top_node falls out of scope here, freeing its body/text
+                # content before the next topic is fetched.
+
+        return zip_path
+
     async def _process_raw_node_list(
         self,
         nodes: List[Dict[str, Any]],
@@ -553,10 +673,16 @@ class CourseMarkdownConverter:
         caption_downloader: Optional[Callable] = None,
         embed_url_resolver: Optional[Callable] = None,
         video_downloader: Optional[Callable] = None,
+        progress_base: float = 0.0,
+        progress_span: float = 100.0,
     ):
+        # progress_base/progress_span let a caller processing one topic at a
+        # time (build_raw_zip_package_streaming) blend this topic's 0-100%
+        # progress into its slice of the whole course's progress bar,
+        # instead of the 0-100% range always meaning "this whole course".
         for node in nodes:
             processed_count[0] += 1
-            pct = (processed_count[0] / max(1, total_nodes)) * 100
+            pct = progress_base + (processed_count[0] / max(1, total_nodes)) * progress_span
             if progress_callback:
                 await progress_callback(f"Downloading raw files for: {node.get('title', 'Untitled')}", pct)
 
@@ -607,6 +733,8 @@ class CourseMarkdownConverter:
                         caption_downloader=caption_downloader,
                         embed_url_resolver=embed_url_resolver,
                         video_downloader=video_downloader,
+                        progress_base=progress_base,
+                        progress_span=progress_span,
                     )
             else:
                 # Raw attachments placed directly into current_dir

@@ -379,18 +379,21 @@ class BlackboardClient:
             "courseId": course_id
         }
 
-    async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
+    async def get_top_level_items(self, course_id: str) -> List[Dict[str, Any]]:
         """
-        Recursively fetches the full content tree for a course.
+        Fetches just the shallow list of top-level content items (topics) for
+        a course - no recursive expansion of children, attachments, or body
+        text. Cheap: one API call. Pairs with build_content_node, which does
+        the expensive recursive expansion for a single item at a time, so a
+        caller can process a course topic-by-topic instead of needing the
+        whole course's content tree in memory at once.
         """
         candidates = self._get_course_id_candidates(course_id)
         resp = None
-        used_fmt_id = None
         for fmt_id in candidates:
             top_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents"
             resp = await self._request_with_retry("GET", top_url)
             if resp.status_code == 200:
-                used_fmt_id = fmt_id
                 self._resolved_course_ids[str(course_id).strip()] = fmt_id
                 break
 
@@ -399,13 +402,24 @@ class BlackboardClient:
             return []
 
         data = resp.json()
-        items = data.get("results", [])
+        return data.get("results", [])
 
+    async def build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Public wrapper for _build_content_node - recursively expands one top-level item's full subtree."""
+        return await self._build_content_node(course_id, item)
+
+    async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
+        """
+        Recursively fetches the full content tree for a course, all at once.
+        Kept for callers that want the whole tree in memory in one shot;
+        get_top_level_items + build_content_node let a caller instead expand
+        and process one topic at a time.
+        """
+        items = await self.get_top_level_items(course_id)
         tree = []
         for item in items:
             node = await self._build_content_node(course_id, item)
             tree.append(node)
-
         return tree
 
     async def get_content_detail(self, course_id: str, content_id: str) -> Dict[str, Any]:
