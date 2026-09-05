@@ -1,13 +1,59 @@
 import asyncio
 import ipaddress
 import logging
+import os
 import socket
+import tempfile
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import httpx
 
 logger = logging.getLogger("blackboard_client")
 logging.basicConfig(level=logging.INFO)
+
+
+class DiskFile:
+    """
+    Marks a downloaded payload that was streamed straight to a temp file on
+    disk instead of being buffered fully in memory, because it grew past
+    _stream_fetch_capped's in-memory spool threshold. A file this large is,
+    in this app, always genuine binary media (a lecture video) - an HTML
+    error/login page never gets anywhere near that size - so callers can
+    treat its presence as already-validated binary content: write it into
+    the zip with zf.write(path, ...) and delete the temp file afterwards,
+    rather than re-reading it into memory to sniff or parse it.
+    """
+    def __init__(self, path: str):
+        self.path = path
+
+
+def _peek(content: Union[bytes, DiskFile], n: int = 64) -> bytes:
+    """First n bytes of a downloaded payload, whether it's in memory or on disk."""
+    if isinstance(content, DiskFile):
+        try:
+            with open(content.path, "rb") as f:
+                return f.read(n)
+        except OSError:
+            return b""
+    return content[:n]
+
+
+def _content_len(content: Union[bytes, DiskFile]) -> int:
+    if isinstance(content, DiskFile):
+        try:
+            return os.path.getsize(content.path)
+        except OSError:
+            return 0
+    return len(content)
+
+
+def _discard(content: Union[bytes, DiskFile]) -> None:
+    """Deletes the backing temp file of a DiskFile that ended up not being used; a no-op for in-memory bytes."""
+    if isinstance(content, DiskFile):
+        try:
+            os.remove(content.path)
+        except OSError:
+            pass
 
 
 class FileTooLargeError(Exception):
@@ -197,13 +243,24 @@ class BlackboardClient:
     # is exceeded rather than after the whole file is already in RAM.
     MAX_VIDEO_DOWNLOAD_BYTES = 300 * 1024 * 1024  # 300MB
 
+    # Even under the 300MB hard cap, fully buffering a file in memory is
+    # risky on a host with ~512MB total RAM - a single ~200-300MB video
+    # held as one bytes object, on top of everything else the process
+    # already has resident, is enough to get OOM-killed mid-extraction
+    # (looks like a hung/dropped connection to the client). Past this
+    # threshold, _stream_fetch_capped spills the rest of the download
+    # straight to a temp file instead of continuing to buffer it.
+    SPOOL_TO_DISK_THRESHOLD_BYTES = 20 * 1024 * 1024  # 20MB
+
     async def _stream_fetch_capped(
         self, url: str, headers: Optional[Dict[str, str]] = None, max_bytes: Optional[int] = None
-    ) -> Optional[bytes]:
+    ) -> Optional[Union[bytes, "DiskFile"]]:
         max_bytes = max_bytes or self.MAX_VIDEO_DOWNLOAD_BYTES
         client = self._client or httpx.AsyncClient(timeout=60.0)
         close_needed = self._client is None
         req_headers = {**self._get_headers(), **(headers or {})}
+        tmp_path = None
+        tmp_file = None
         try:
             async with client.stream("GET", url, headers=req_headers, follow_redirects=True) as resp:
                 if resp.status_code != 200:
@@ -216,21 +273,53 @@ class BlackboardClient:
                 if content_length and int(content_length) > max_bytes:
                     logger.warning(f"Skipping {url}: declared size {content_length} bytes exceeds {max_bytes}-byte cap")
                     raise FileTooLargeError(int(content_length), declared=True)
-                chunks = []
+
+                buf = bytearray()
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if total > max_bytes:
                         logger.warning(f"Aborting download of {url}: exceeded {max_bytes}-byte cap mid-stream")
                         raise FileTooLargeError(total, declared=False)
-                    chunks.append(chunk)
-                return b"".join(chunks)
+
+                    if tmp_file is not None:
+                        tmp_file.write(chunk)
+                        continue
+
+                    buf.extend(chunk)
+                    if len(buf) > self.SPOOL_TO_DISK_THRESHOLD_BYTES:
+                        fd, tmp_path = tempfile.mkstemp(suffix=".bin")
+                        tmp_file = os.fdopen(fd, "wb")
+                        tmp_file.write(bytes(buf))
+                        buf = None
+
+                if tmp_file is not None:
+                    tmp_file.close()
+                    tmp_file = None
+                    logger.info(f"Streamed {total} bytes for {url} straight to disk (over {self.SPOOL_TO_DISK_THRESHOLD_BYTES}-byte in-memory threshold)")
+                    return DiskFile(tmp_path)
+                return bytes(buf)
         except FileTooLargeError:
+            if tmp_file is not None:
+                tmp_file.close()
+                tmp_file = None
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             raise
         except Exception as e:
             logger.debug(f"Streaming fetch failed for {url}: {e}")
             return None
         finally:
+            if tmp_file is not None:
+                tmp_file.close()
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
             if close_needed:
                 await client.aclose()
 
@@ -580,7 +669,7 @@ class BlackboardClient:
             return resp.json().get("results", [])
         return []
 
-    async def _try_download_kaltura_video(self, entry_id: str, orig_url: str) -> Optional[bytes]:
+    async def _try_download_kaltura_video(self, entry_id: str, orig_url: str) -> Optional[Union[bytes, DiskFile]]:
         """
         Attempts to fetch direct MP4 video bytes for a Kaltura entry_id across candidate partner IDs.
         """
@@ -609,12 +698,15 @@ class BlackboardClient:
             for candidate_url in urls:
                 try:
                     content = await self._stream_fetch_capped(candidate_url, headers=headers)
-                    if content and len(content) > 1000:
-                        snippet = content[:64]
-                        if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
-                            if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
-                                logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({len(content)} bytes) via {candidate_url}")
-                                return content
+                    if content and _content_len(content) > 1000:
+                        snippet = _peek(content)
+                        looks_like_error = snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet
+                        looks_like_video = b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00")
+                        if not looks_like_error and looks_like_video:
+                            logger.info(f"Successfully downloaded valid MP4 Kaltura video for {entry_id} ({_content_len(content)} bytes) via {candidate_url}")
+                            return content
+                    if content:
+                        _discard(content)
                 except FileTooLargeError:
                     # Every candidate URL serves the same underlying video, so
                     # if one mirror is too large they all will be - no point
@@ -628,11 +720,14 @@ class BlackboardClient:
             try:
                 if await self._is_safe_public_url(orig_url):
                     content = await self._stream_fetch_capped(orig_url, headers=headers)
-                    if content and len(content) > 1000:
-                        snippet = content[:64]
-                        if not snippet.startswith(b"<") and not snippet.startswith(b"{") and not b"<?xml" in snippet and not b"404 Not Found" in snippet:
-                            if b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00"):
-                                return content
+                    if content and _content_len(content) > 1000:
+                        snippet = _peek(content)
+                        looks_like_error = snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet
+                        looks_like_video = b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00")
+                        if not looks_like_error and looks_like_video:
+                            return content
+                    if content:
+                        _discard(content)
                 else:
                     logger.warning(f"Refusing to fetch potentially unsafe URL (SSRF guard): {orig_url}")
             except FileTooLargeError:
@@ -788,7 +883,7 @@ class BlackboardClient:
             return None
         return await self._try_download_kaltura_captions(entry_id)
 
-    async def download_kaltura_video_bytes(self, attachment_id: str) -> Optional[bytes]:
+    async def download_kaltura_video_bytes(self, attachment_id: str) -> Optional[Union[bytes, DiskFile]]:
         """
         Fetches raw MP4 bytes for a Kaltura video entry embedded via body/description
         HTML (i.e. with no separate downloadable attachment entry pointing at it).
@@ -798,7 +893,7 @@ class BlackboardClient:
             return None
         return await self._try_download_kaltura_video(entry_id, attachment_id)
 
-    async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[bytes]:
+    async def download_attachment_bytes(self, course_id: str, content_id: str, attachment_id: str) -> Optional[Union[bytes, DiskFile]]:
         import re
         if "kaltura" in attachment_id.lower() or re.search(r'\b([01]_[a-zA-Z0-9]{8,12})\b', attachment_id):
             entry_id = self._extract_kaltura_entry_id(attachment_id)
@@ -831,6 +926,13 @@ class BlackboardClient:
             logger.error(f"Failed (or refused, or exceeded size cap) to download attachment {attachment_id} (URL: {url})")
             return None
 
+        # A DiskFile only ever comes from content that grew past the in-memory
+        # spool threshold (tens of MB) - an HTML launch page never gets
+        # anywhere near that size, so there's nothing to scan; it's already
+        # confirmed binary media.
+        if isinstance(content, DiskFile):
+            return content
+
         # If response is HTML launch page, scan for embedded Kaltura entry_id or .mp4 URL
         if content.startswith(b"<!DOCTYPE") or content.startswith(b"<html") or content.startswith(b"<?xml") or b"<iframe" in content:
             try:
@@ -847,8 +949,10 @@ class BlackboardClient:
                     mp4_url = mp4_match.group(1)
                     if await self._is_safe_public_url(mp4_url):
                         mp4_content = await self._stream_fetch_capped(mp4_url, headers=headers)
-                        if mp4_content and len(mp4_content) > 10000:
+                        if mp4_content and _content_len(mp4_content) > 10000:
                             return mp4_content
+                        if mp4_content:
+                            _discard(mp4_content)
             except Exception as e:
                 logger.debug(f"Error parsing launch HTML page for video stream ({url}): {e}")
 

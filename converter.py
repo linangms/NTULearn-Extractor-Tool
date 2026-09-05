@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 import markdownify
 
-from blackboard_client import FileTooLargeError
+from blackboard_client import FileTooLargeError, DiskFile, _peek, _content_len, _discard
 
 logger = logging.getLogger("converter")
 
@@ -16,18 +16,40 @@ logger = logging.getLogger("converter")
 def _format_mb(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.0f}MB"
 
-def _is_valid_video_bytes(data: bytes) -> bool:
+def _is_valid_video_bytes(data) -> bool:
     """
     Checks for a real video binary signature so an HTML error/login page
     (e.g. from an unresolved LTI launch link) doesn't get saved as if it
-    were the video itself.
+    were the video itself. A DiskFile (content streamed straight to disk
+    because it grew past the in-memory spool threshold) is always genuine
+    binary media by construction - an HTML error page never gets that
+    large - so it's treated as valid without re-reading it from disk.
     """
+    if isinstance(data, DiskFile):
+        return True
     if not data or len(data) < 1000:
         return False
     snippet = data[:64]
     if snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
         return False
     return bool(b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet)
+
+
+def _write_downloaded(zf: "zipfile.ZipFile", zip_target_path: str, data) -> Optional[bytes]:
+    """
+    Writes a downloaded payload (raw bytes, or a DiskFile streamed straight
+    to disk to avoid buffering a whole video in memory) into the zip.
+    Returns the bytes for small in-memory content, so callers can still
+    sniff or parse it (captions, text extraction); returns None for
+    on-disk content, which is always large binary media - not something
+    this tool parses text from or needs to caption-sniff.
+    """
+    if isinstance(data, DiskFile):
+        zf.write(data.path, zip_target_path)
+        _discard(data)
+        return None
+    zf.writestr(zip_target_path, data)
+    return data
 
 
 def _looks_like_kaltura_attachment(attachment_id: str, att: Dict[str, Any]) -> bool:
@@ -402,20 +424,21 @@ class CourseMarkdownConverter:
                             await progress_callback(f"Error downloading {filename}: download failed, skipping", pct)
 
                     if data:
-                        zf.writestr(zip_target_path, data)
-                        extracted_text = extract_text_from_file_bytes(data, filename)
-                        is_caption_data = (
-                            data.startswith(b"WEBVTT")
-                            or b"-->" in data[:500]
-                            or lower_fn.endswith(".srt")
-                            or lower_fn.endswith(".vtt")
-                        )
+                        written_bytes = _write_downloaded(zf, zip_target_path, data)
+                        if written_bytes is not None:
+                            extracted_text = extract_text_from_file_bytes(written_bytes, filename)
+                            is_caption_data = (
+                                written_bytes.startswith(b"WEBVTT")
+                                or b"-->" in written_bytes[:500]
+                                or lower_fn.endswith(".srt")
+                                or lower_fn.endswith(".vtt")
+                            )
 
-                        if is_caption_data:
-                            self._save_caption_and_transcript(node, data, lower_fn, zf, current_dir, doc_text_map)
-                            real_transcript_saved = True
-                        elif extracted_text and extracted_text.strip():
-                            doc_text_map[filename] = extracted_text
+                            if is_caption_data:
+                                self._save_caption_and_transcript(node, written_bytes, lower_fn, zf, current_dir, doc_text_map)
+                                real_transcript_saved = True
+                            elif extracted_text and extracted_text.strip():
+                                doc_text_map[filename] = extracted_text
 
                     # A Kaltura video's captions live as a separate asset, so fetch
                     # them independently rather than only as a fallback for when
@@ -557,9 +580,10 @@ class CourseMarkdownConverter:
                             try:
                                 data = await attachment_downloader(self.course_id, content_id, att_id)
                                 if data:
-                                    zf.writestr(zip_target_path, data)
+                                    size_bytes = _content_len(data)
+                                    _write_downloaded(zf, zip_target_path, data)
                                     if progress_callback:
-                                        await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                        await progress_callback(f"Downloaded file: {filename} ({size_bytes} bytes)", pct)
                             except FileTooLargeError as e:
                                 size_str = _format_mb(e.size_bytes)
                                 logger.warning(f"Skipped {filename}: exceeds size cap ({size_str})")
@@ -626,9 +650,9 @@ class CourseMarkdownConverter:
                                 if progress_callback:
                                     await progress_callback(f"Error downloading {filename}: download failed, skipping", pct)
 
-                            if data and len(data) > 100:
+                            if data and _content_len(data) > 100:
                                 lower_fn = filename.lower()
-                                is_caption_data = (
+                                is_caption_data = isinstance(data, bytes) and (
                                     data.startswith(b"WEBVTT")
                                     or b"-->" in data[:500]
                                     or lower_fn.endswith(".srt")
@@ -647,23 +671,19 @@ class CourseMarkdownConverter:
                                     is_video_file = any(lower_fn.endswith(ext) for ext in [".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"])
 
                                     # Validate binary video headers to prevent saving HTML/XML 404 error pages as .mp4
-                                    valid_video = True
-                                    if is_video_file:
-                                        snippet = data[:64]
-                                        if len(data) < 1000 or snippet.startswith(b"<") or snippet.startswith(b"{") or b"<?xml" in snippet or b"404 Not Found" in snippet:
-                                            valid_video = False
-                                        elif not (b"ftyp" in snippet or b"moov" in snippet or snippet.startswith(b"\x00\x00\x00") or b"matroska" in snippet):
-                                            valid_video = False
+                                    valid_video = (not is_video_file) or _is_valid_video_bytes(data)
 
                                     if valid_video:
-                                        zf.writestr(zip_target_path, data)
+                                        size_bytes = _content_len(data)
+                                        _write_downloaded(zf, zip_target_path, data)
                                         downloaded_any = True
                                         if progress_callback:
-                                            await progress_callback(f"Downloaded file: {filename} ({len(data)} bytes)", pct)
+                                            await progress_callback(f"Downloaded file: {filename} ({size_bytes} bytes)", pct)
                                     else:
-                                        logger.warning(f"Attachment {filename} returned non-video/HTML error data ({len(data)} bytes). Skipping saving invalid video file.")
+                                        logger.warning(f"Attachment {filename} returned non-video/HTML error data ({_content_len(data)} bytes). Skipping saving invalid video file.")
                                         if progress_callback:
                                             await progress_callback(f"Skipped {filename}: server returned an error page instead of the file", pct)
+                                        _discard(data)
 
                                     # The Kaltura caption/subtitle asset is separate from the video
                                     # asset itself, so fetch it independently rather than only as a
@@ -738,11 +758,14 @@ class CourseMarkdownConverter:
                         if _looks_like_kaltura_attachment(search_text, {}):
                             try:
                                 video_data = await video_downloader(search_text)
-                                if video_data and len(video_data) > 10000:
-                                    zf.writestr(f"{current_dir}/{title}.mp4", video_data)
+                                if video_data and _content_len(video_data) > 10000:
+                                    size_bytes = _content_len(video_data)
+                                    _write_downloaded(zf, f"{current_dir}/{title}.mp4", video_data)
                                     real_video_saved = True
                                     if progress_callback:
-                                        await progress_callback(f"Downloaded video: {title} ({len(video_data)} bytes)", pct)
+                                        await progress_callback(f"Downloaded video: {title} ({size_bytes} bytes)", pct)
+                                elif video_data:
+                                    _discard(video_data)
                             except FileTooLargeError as e:
                                 size_str = _format_mb(e.size_bytes)
                                 logger.warning(f"Skipped video {title}: exceeds size cap ({size_str})")
