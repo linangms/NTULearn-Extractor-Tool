@@ -807,28 +807,52 @@ async def extract_course_stream(
 
             # Define attachment downloader
             if use_real_api and bb_client_id and bb_client_secret:
+                # Kaltura video/caption resolution tries many candidate URLs
+                # (multiple partner ids x multiple hosts), each with its own
+                # retries - a single unreachable candidate can otherwise stall
+                # for minutes with zero progress, hanging the whole extraction
+                # and eventually dropping the SSE connection client-side. A hard
+                # per-file timeout guarantees a slow/broken file is skipped
+                # instead of blocking every other file behind it.
+                ATTACHMENT_FETCH_TIMEOUT_SECONDS = 60
+
+                async def _with_timeout(coro, label: str):
+                    try:
+                        return await asyncio.wait_for(coro, timeout=ATTACHMENT_FETCH_TIMEOUT_SECONDS)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timed out after {ATTACHMENT_FETCH_TIMEOUT_SECONDS}s fetching {label} - skipping it")
+                        return None
+
                 async def real_downloader(c_id, content_id, att_id):
-                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
-                        await client.authenticate()
-                        return await client.download_attachment_bytes(c_id, content_id, att_id)
+                    async def _do():
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                            await client.authenticate()
+                            return await client.download_attachment_bytes(c_id, content_id, att_id)
+                    return await _with_timeout(_do(), f"attachment {att_id}")
                 downloader_func = real_downloader
 
                 async def real_caption_downloader(c_id, content_id, att_id):
-                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
-                        await client.authenticate()
-                        return await client.download_kaltura_caption_bytes(att_id)
+                    async def _do():
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                            await client.authenticate()
+                            return await client.download_kaltura_caption_bytes(att_id)
+                    return await _with_timeout(_do(), f"captions for {att_id}")
                 caption_downloader_func = real_caption_downloader
 
                 async def real_embed_url_resolver(text):
-                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
-                        await client.authenticate()
-                        return await client.resolve_kaltura_embed_url(text)
+                    async def _do():
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                            await client.authenticate()
+                            return await client.resolve_kaltura_embed_url(text)
+                    return await _with_timeout(_do(), "embed URL resolution")
                 embed_url_resolver_func = real_embed_url_resolver
 
                 async def real_video_downloader(text):
-                    async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
-                        await client.authenticate()
-                        return await client.download_kaltura_video_bytes(text)
+                    async def _do():
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as client:
+                            await client.authenticate()
+                            return await client.download_kaltura_video_bytes(text)
+                    return await _with_timeout(_do(), "Kaltura video")
                 video_downloader_func = real_video_downloader
             else:
                 async def mock_downloader(c_id, content_id, att_id):
