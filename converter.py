@@ -52,6 +52,23 @@ def _write_downloaded(zf: "zipfile.ZipFile", zip_target_path: str, data) -> Opti
     return data
 
 
+async def _ensure_expanded(item: Dict[str, Any], course_id: Optional[str], expand_fn: Optional[Callable]) -> Dict[str, Any]:
+    """
+    Expands a raw, unbuilt child item (as returned by Blackboard's shallow
+    /children listing) into a fully built node - title, body, attachments,
+    Kaltura resolution, and its OWN direct children as raw items in turn -
+    by calling expand_fn (BlackboardClient.build_content_node) on demand,
+    one node at a time, instead of a whole folder tree needing to already be
+    built before any of it can be processed. Already-built nodes (recognized
+    by an "attachments" key, which every real build sets and a raw API item
+    never has) and pre-built trees (expand_fn is None, e.g. the mock/test
+    content trees) pass through unchanged.
+    """
+    if expand_fn is not None and "attachments" not in item:
+        return await expand_fn(course_id, item)
+    return item
+
+
 def _looks_like_kaltura_attachment(attachment_id: str, att: Dict[str, Any]) -> bool:
     """
     Cheap local check so we only ask the caption_downloader to hit Kaltura's API
@@ -211,13 +228,21 @@ class CourseMarkdownConverter:
         md = re.sub(r"\n{3,}", "\n\n", md).strip()
         return md
 
-    def _flatten_tree(
+    async def _flatten_tree(
         self,
         nodes: List[Dict[str, Any]],
         flat_list: List[Dict[str, Any]],
         folder_path: str = "",
+        course_id: Optional[str] = None,
+        expand_fn: Optional[Callable] = None,
     ):
-        for node in nodes:
+        # expand_fn (BlackboardClient.build_content_node), when given, expands
+        # a raw child stub into a full node one at a time, right before it's
+        # needed - see _ensure_expanded. Without it (a pre-built tree, e.g.
+        # the mock/test content trees), every node is already fully built and
+        # this behaves exactly as it always did.
+        for raw_node in nodes:
+            node = await _ensure_expanded(raw_node, course_id, expand_fn)
             title = node.get("title", "Untitled")
             current_path = f"{folder_path} / {title}" if folder_path else title
 
@@ -237,11 +262,56 @@ class CourseMarkdownConverter:
                     node_copy = dict(node)
                     node_copy["folder_path"] = folder_path
                     flat_list.append(node_copy)
-                self._flatten_tree(children, flat_list, folder_path=current_path)
+                await self._flatten_tree(children, flat_list, folder_path=current_path, course_id=course_id, expand_fn=expand_fn)
             else:
                 node_copy = dict(node)
                 node_copy["folder_path"] = folder_path
                 flat_list.append(node_copy)
+
+    async def _iter_flatten_tree(
+        self,
+        nodes: List[Dict[str, Any]],
+        folder_path: str = "",
+        course_id: Optional[str] = None,
+        expand_fn: Optional[Callable] = None,
+    ):
+        """
+        Same traversal as _flatten_tree, but yields one flattened item at a
+        time instead of collecting the whole (possibly lazily-expanded)
+        subtree into a list first. _flatten_tree's expand_fn support alone
+        isn't enough to keep a big folder tree's memory bounded, since it
+        still builds a complete flat_list before returning - this generator
+        is what lets build_zip_package_streaming release each item after
+        it's written, one at a time, all the way down into nested folders,
+        not just between top-level topics.
+        """
+        for raw_node in nodes:
+            node = await _ensure_expanded(raw_node, course_id, expand_fn)
+            title = node.get("title", "Untitled")
+            current_path = f"{folder_path} / {title}" if folder_path else title
+
+            body = (
+                node.get("body")
+                or node.get("description")
+                or node.get("instructions")
+                or node.get("summary")
+                or node.get("formattedBody")
+                or ""
+            )
+            has_content = bool(body and body.strip()) or bool(node.get("attachments"))
+
+            children = node.get("children", [])
+            if children:
+                if has_content:
+                    node_copy = dict(node)
+                    node_copy["folder_path"] = folder_path
+                    yield node_copy
+                async for item in self._iter_flatten_tree(children, folder_path=current_path, course_id=course_id, expand_fn=expand_fn):
+                    yield item
+            else:
+                node_copy = dict(node)
+                node_copy["folder_path"] = folder_path
+                yield node_copy
 
     def _build_readme(self, index_entries: List[Tuple[str, str, str]]) -> str:
         """index_entries: list of (title, folder_path, filename) - cheap metadata only."""
@@ -375,7 +445,7 @@ class CourseMarkdownConverter:
         os.close(fd)
 
         flat_items = []
-        self._flatten_tree(content_tree, flat_items)
+        await self._flatten_tree(content_tree, flat_items)
         total_nodes = len(flat_items)
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -400,16 +470,19 @@ class CourseMarkdownConverter:
         attachment_downloader: Optional[Callable[[str, str, str], Any]] = None,
         caption_downloader: Optional[Callable[[str, str, str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
+        course_id: Optional[str] = None,
+        expand_fn: Optional[Callable] = None,
     ) -> str:
         """
         Same output as build_zip_package, but `topics` is an async iterator
         that yields one top-level topic node at a time instead of a
-        pre-built list of the whole course. Each topic (and its heavy body
-        HTML) is processed and written to the zip, then released before the
-        next topic is fetched - this is what keeps a large, multi-topic
-        course from steadily growing the process's memory footprint over a
-        long-running extraction, instead of holding every topic in memory
-        for the whole run.
+        pre-built list of the whole course, and (when expand_fn is given)
+        each topic's own folders are expanded and released one at a time too
+        via _iter_flatten_tree, instead of requiring a topic's entire nested
+        subtree to be fetched before any of it can be processed. This is
+        what keeps a single unusually large topic (e.g. one folder holding
+        many tutorials' worth of PDFs and videos) from being just as much of
+        a memory spike as the whole course used to be.
         """
         fd, zip_path = tempfile.mkstemp(suffix=".zip")
         os.close(fd)
@@ -421,20 +494,26 @@ class CourseMarkdownConverter:
             topic_num = 0
             async for top_node in topics:
                 topic_num += 1
-                flat_items = []
-                self._flatten_tree([top_node], flat_items)
-                topic_item_count = len(flat_items)
-
-                for i, item in enumerate(flat_items):
+                # Rough, cheap estimate of this topic's size (top_node plus
+                # whatever direct children are already visible) purely to
+                # interpolate progress within the topic - it undercounts
+                # deeply nested folders, but doesn't require expanding
+                # anything to compute, so it doesn't cost the memory it's
+                # trying to help report on.
+                topic_item_count = self._count_nodes([top_node])
+                i = 0
+                async for item in self._iter_flatten_tree([top_node], course_id=course_id, expand_fn=expand_fn):
                     idx += 1
-                    within_topic = (i + 1) / max(1, topic_item_count)
+                    i += 1
+                    within_topic = min(i / max(1, topic_item_count), 1.0)
                     pct = ((topic_num - 1 + within_topic) / max(1, total_topics)) * 100
                     filename, title, folder_path = await self._write_markdown_item(
                         item, idx, out_folder, zf, attachment_downloader, caption_downloader, progress_callback, pct
                     )
                     index_entries.append((title, folder_path, filename))
-                # top_node/flat_items fall out of scope here, freeing this
-                # topic's body text before the next topic is fetched.
+                # top_node and everything _iter_flatten_tree expanded from it
+                # fall out of scope here, freeing this topic's body text
+                # before the next topic is fetched.
 
             zf.writestr(f"{out_folder}/00_README.md", self._build_readme(index_entries))
 
@@ -623,14 +702,16 @@ class CourseMarkdownConverter:
         embed_url_resolver: Optional[Callable[[str], Any]] = None,
         video_downloader: Optional[Callable[[str], Any]] = None,
         progress_callback: Optional[Callable[[str, float], Any]] = None,
+        course_id: Optional[str] = None,
+        expand_fn: Optional[Callable] = None,
     ) -> str:
         """
         Same output as build_raw_zip_package, but `topics` is an async
         iterator that yields one top-level topic node at a time instead of
-        a pre-built list of the whole course. Each topic is fetched,
-        written into the zip, and released before the next one is fetched -
-        see build_zip_package_streaming for why that matters on a large,
-        multi-topic course.
+        a pre-built list of the whole course, and (when expand_fn is given)
+        each topic's own folders are expanded and released one at a time
+        too - see build_zip_package_streaming for why a single large topic
+        needs this on top of topic-by-topic streaming, not just the latter.
         """
         fd, zip_path = tempfile.mkstemp(suffix=".zip")
         os.close(fd)
@@ -641,6 +722,9 @@ class CourseMarkdownConverter:
             topic_num = 0
             async for top_node in topics:
                 topic_num += 1
+                # Rough, cheap size estimate - see build_zip_package_streaming's
+                # identical use of _count_nodes for why this undercounts deep
+                # nesting but is fine for interpolating progress.
                 topic_node_count = self._count_nodes([top_node])
                 await self._process_raw_node_list(
                     nodes=[top_node],
@@ -655,6 +739,8 @@ class CourseMarkdownConverter:
                     total_nodes=topic_node_count,
                     progress_base=((topic_num - 1) / max(1, total_topics)) * 100,
                     progress_span=(1 / max(1, total_topics)) * 100,
+                    course_id=course_id,
+                    expand_fn=expand_fn,
                 )
                 # top_node falls out of scope here, freeing its body/text
                 # content before the next topic is fetched.
@@ -675,14 +761,22 @@ class CourseMarkdownConverter:
         video_downloader: Optional[Callable] = None,
         progress_base: float = 0.0,
         progress_span: float = 100.0,
+        course_id: Optional[str] = None,
+        expand_fn: Optional[Callable] = None,
     ):
         # progress_base/progress_span let a caller processing one topic at a
         # time (build_raw_zip_package_streaming) blend this topic's 0-100%
         # progress into its slice of the whole course's progress bar,
         # instead of the 0-100% range always meaning "this whole course".
-        for node in nodes:
+        # expand_fn (BlackboardClient.build_content_node), when given, turns
+        # a raw child stub into a real node right before it's touched - see
+        # _ensure_expanded - so a folder full of sub-folders is expanded and
+        # released one at a time instead of all at once.
+        for raw_node in nodes:
+            node = await _ensure_expanded(raw_node, course_id, expand_fn)
             processed_count[0] += 1
-            pct = progress_base + (processed_count[0] / max(1, total_nodes)) * progress_span
+            within_topic = min(processed_count[0] / max(1, total_nodes), 1.0)
+            pct = progress_base + within_topic * progress_span
             if progress_callback:
                 await progress_callback(f"Downloading raw files for: {node.get('title', 'Untitled')}", pct)
 
@@ -735,6 +829,8 @@ class CourseMarkdownConverter:
                         video_downloader=video_downloader,
                         progress_base=progress_base,
                         progress_span=progress_span,
+                        course_id=course_id,
+                        expand_fn=expand_fn,
                     )
             else:
                 # Raw attachments placed directly into current_dir

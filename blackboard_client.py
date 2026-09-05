@@ -405,22 +405,32 @@ class BlackboardClient:
         return data.get("results", [])
 
     async def build_content_node(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
-        """Public wrapper for _build_content_node - recursively expands one top-level item's full subtree."""
+        """
+        Public wrapper for _build_content_node - builds ONE item's own data
+        (title, body, attachments, Kaltura resolution) plus its direct
+        children as raw, unexpanded API items. Call this again on any child
+        to expand one more level, on demand, instead of eagerly recursing
+        through the whole subtree.
+        """
         return await self._build_content_node(course_id, item)
+
+    async def _build_content_node_deep(self, course_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Fully recursive version of build_content_node - expands every descendant eagerly. Used by get_contents_tree."""
+        node = await self._build_content_node(course_id, item)
+        node["children"] = [await self._build_content_node_deep(course_id, child) for child in node.get("children", [])]
+        return node
 
     async def get_contents_tree(self, course_id: str) -> List[Dict[str, Any]]:
         """
-        Recursively fetches the full content tree for a course, all at once.
-        Kept for callers that want the whole tree in memory in one shot;
-        get_top_level_items + build_content_node let a caller instead expand
-        and process one topic at a time.
+        Recursively fetches the full content tree for a course, all at once -
+        every topic and every nested folder fully expanded and held in memory
+        together. Kept for callers that want that; get_top_level_items +
+        build_content_node instead let a caller expand and process the course
+        one topic (or even one folder) at a time, releasing each before
+        fetching the next - see converter.py's streaming build methods.
         """
         items = await self.get_top_level_items(course_id)
-        tree = []
-        for item in items:
-            node = await self._build_content_node(course_id, item)
-            tree.append(node)
-        return tree
+        return [await self._build_content_node_deep(course_id, item) for item in items]
 
     async def get_content_detail(self, course_id: str, content_id: str) -> Dict[str, Any]:
         candidates = self._get_course_id_candidates(course_id)
@@ -660,18 +670,26 @@ class BlackboardClient:
 
         node["attachments"] = attachments
 
-        # Always check if children exist for this item (covers modules, lessons, folders)
+        # Always check if children exist for this item (covers modules, lessons, folders).
+        # Deliberately shallow: children are left as raw, un-built API items (no
+        # attachments/body/Kaltura resolution done on them yet) rather than
+        # recursed into here. A node with a deep folder tree - e.g. a single
+        # topic containing many tutorial sub-folders full of PDFs and videos -
+        # would otherwise force the ENTIRE subtree to be fetched and held in
+        # memory before any of it could be processed, the same problem
+        # topic-by-topic streaming solves one level up. build_content_node
+        # (this method) is called again on each raw child, one at a time, as
+        # a caller actually descends into it - see converter.py's
+        # _ensure_expanded, which recognizes an unexpanded child by the
+        # absence of the "attachments" key this method always sets.
         fmt_id = self._format_course_id(course_id)
         child_url = f"{self.base_url}/learn/api/public/v1/courses/{fmt_id}/contents/{content_id}/children"
         child_resp = await self._request_with_retry("GET", child_url)
         if child_resp.status_code == 200:
-            child_data = child_resp.json()
-            child_items = child_data.get("results", [])
+            child_items = child_resp.json().get("results", [])
             if child_items:
                 node["isFolder"] = True
-                for child_item in child_items:
-                    child_node = await self._build_content_node(course_id, child_item)
-                    node["children"].append(child_node)
+                node["children"] = child_items
 
         return node
 

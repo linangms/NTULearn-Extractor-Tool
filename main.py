@@ -700,17 +700,11 @@ async def extract_course_stream(
                             display_title = details.get("courseId") or details.get("name") or display_title
                         # Just the shallow topic list here (cheap) - each topic's
                         # full subtree (all its body HTML, attachments, etc.) is
-                        # fetched one at a time inside topics_source() below, as
-                        # it's processed, instead of holding every topic for the
-                        # whole course in memory for the whole extraction.
+                        # fetched lazily, one folder at a time, as run_packaging
+                        # actually processes it below - see needs_expansion.
                         top_items = await bb_client.get_top_level_items(course_id)
                     total_topics = len(top_items)
-
-                    async def topics_source():
-                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as topic_client:
-                            await topic_client.authenticate()
-                            for item in top_items:
-                                yield await topic_client.build_content_node(course_id, item)
+                    needs_expansion = True
 
                     yield f"data: {json.dumps({'stage': 1, 'progress': 35, 'message': f'Authenticated successfully! Fetching contents for {display_title}...', 'status': 'running', 'course_title': display_title})}\n\n"
                 except Exception as api_err:
@@ -748,6 +742,7 @@ async def extract_course_stream(
                         }
                     ]
                     total_topics = len(tree)
+                    needs_expansion = False
 
                     async def topics_source():
                         for node in tree:
@@ -812,6 +807,7 @@ async def extract_course_stream(
                     }
                 ]
                 total_topics = len(tree)
+                needs_expansion = False
 
                 async def topics_source():
                     for node in tree:
@@ -902,24 +898,62 @@ async def extract_course_stream(
 
             async def run_packaging():
                 try:
-                    if mode == "raw":
-                        res = await converter.build_raw_zip_package_streaming(
-                            topics=topics_source(),
-                            total_topics=total_topics,
-                            attachment_downloader=downloader_func,
-                            caption_downloader=caption_downloader_func,
-                            embed_url_resolver=embed_url_resolver_func,
-                            video_downloader=video_downloader_func,
-                            progress_callback=progress_cb,
-                        )
+                    if needs_expansion:
+                        # Real Blackboard data: keep one authenticated client open for
+                        # the whole packaging phase, so both yielding each topic AND
+                        # expand_fn (used to lazily expand a topic's own folders one
+                        # at a time) share it, rather than each topic - or each
+                        # folder inside one - needing its own fresh client.
+                        async with BlackboardClient(bb_base_url, client_id=bb_client_id, client_secret=bb_client_secret) as topic_client:
+                            await topic_client.authenticate()
+
+                            async def expanding_topics_source():
+                                for item in top_items:
+                                    yield await topic_client.build_content_node(course_id, item)
+
+                            if mode == "raw":
+                                res = await converter.build_raw_zip_package_streaming(
+                                    topics=expanding_topics_source(),
+                                    total_topics=total_topics,
+                                    attachment_downloader=downloader_func,
+                                    caption_downloader=caption_downloader_func,
+                                    embed_url_resolver=embed_url_resolver_func,
+                                    video_downloader=video_downloader_func,
+                                    progress_callback=progress_cb,
+                                    course_id=course_id,
+                                    expand_fn=topic_client.build_content_node,
+                                )
+                            else:
+                                res = await converter.build_zip_package_streaming(
+                                    topics=expanding_topics_source(),
+                                    total_topics=total_topics,
+                                    attachment_downloader=downloader_func,
+                                    caption_downloader=caption_downloader_func,
+                                    progress_callback=progress_cb,
+                                    course_id=course_id,
+                                    expand_fn=topic_client.build_content_node,
+                                )
                     else:
-                        res = await converter.build_zip_package_streaming(
-                            topics=topics_source(),
-                            total_topics=total_topics,
-                            attachment_downloader=downloader_func,
-                            caption_downloader=caption_downloader_func,
-                            progress_callback=progress_cb,
-                        )
+                        # Mock / fallback content trees are already fully built -
+                        # nothing to expand lazily.
+                        if mode == "raw":
+                            res = await converter.build_raw_zip_package_streaming(
+                                topics=topics_source(),
+                                total_topics=total_topics,
+                                attachment_downloader=downloader_func,
+                                caption_downloader=caption_downloader_func,
+                                embed_url_resolver=embed_url_resolver_func,
+                                video_downloader=video_downloader_func,
+                                progress_callback=progress_cb,
+                            )
+                        else:
+                            res = await converter.build_zip_package_streaming(
+                                topics=topics_source(),
+                                total_topics=total_topics,
+                                attachment_downloader=downloader_func,
+                                caption_downloader=caption_downloader_func,
+                                progress_callback=progress_cb,
+                            )
                     await progress_queue.put(None)
                     return res
                 except Exception as ex:
